@@ -131,10 +131,13 @@
             return;
           }
           const resolved = doc.resolve(Math.min(pos + 1, doc.content.size));
-          created.dispatch(
-            created.state.tr.setSelection(TextSelection.near(resolved)).scrollIntoView(),
-          );
+          created.dispatch(created.state.tr.setSelection(TextSelection.near(resolved)));
           created.focus();
+          const dom = created.nodeDOM(pos);
+          if (dom instanceof HTMLElement) {
+            // 目录要对齐到阅读区顶部。PM 的 scrollIntoView 只保证「勉强看见」，标题会被贴在底部。
+            dom.scrollIntoView({ block: "start", inline: "nearest" });
+          }
         },
       });
       return () => {

@@ -6,7 +6,7 @@
 /** Markdown 文档表面：序列化当前文档，并按大纲位置跳转。 */
 export type MarkdownEditorApi = {
   serialize: () => string;
-  /** 把选区移到 heading 节点起点并滚入视野。 */
+  /** 把选区移到标题内，并把该标题滚到阅读区顶部。 */
   jumpTo: (pos: number) => void;
 };
 
