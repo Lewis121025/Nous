@@ -1,5 +1,6 @@
 /**
- * 公式 NodeView 与最小输入：视口内才排版；点进去改 TeX，失焦才排这一条。
+ * 公式 NodeView 与最小输入：打开时排版，滚动不再卸预览。
+ * 点进去改 TeX，失焦才排这一条。
  */
 import { inputRules, InputRule } from "prosemirror-inputrules";
 import { keymap } from "prosemirror-keymap";
@@ -8,7 +9,7 @@ import type { Command, EditorState, Plugin, Transaction } from "prosemirror-stat
 import type { EditorView, NodeView, NodeViewConstructor } from "prosemirror-view";
 import { peekRenderedTex, renderTex } from "./mathjax";
 import { documentSchema } from "./schema";
-import { mathPlaceholderText, observeViewport } from "./viewport";
+import { mathPlaceholderText } from "./viewport";
 
 /**
  * 预览 / 源码两态。排版只改 this.dom，不 dispatch；只有用户改了 tex 才写回 attr。
@@ -18,10 +19,9 @@ class MathNodeView implements NodeView {
   private tex: string;
   private readonly display: boolean;
   private editing = false;
-  private visible = false;
+  private previewing = false;
   private renderGen = 0;
   private sourceEl: HTMLTextAreaElement | HTMLInputElement | null = null;
-  private readonly stopObserve: () => void;
 
   constructor(
     node: PmNode,
@@ -35,18 +35,7 @@ class MathNodeView implements NodeView {
     this.dom.dataset.mathTex = this.tex;
     this.dom.dataset.mathDisplay = this.display ? "true" : "false";
     this.dom.contentEditable = "false";
-    this.showPlaceholder();
-    this.stopObserve = observeViewport(this.dom, (visible) => {
-      this.visible = visible;
-      if (this.editing) {
-        return;
-      }
-      if (visible) {
-        this.showPreview();
-      } else {
-        this.showPlaceholder();
-      }
-    });
+    this.showPreview();
   }
 
   selectNode(): void {
@@ -67,13 +56,10 @@ class MathNodeView implements NodeView {
       return true;
     }
     this.tex = next;
+    this.previewing = false;
     this.dom.dataset.mathTex = next;
     if (!this.editing) {
-      if (this.visible) {
-        this.showPreview();
-      } else {
-        this.showPlaceholder();
-      }
+      this.showPreview();
     }
     return true;
   }
@@ -88,7 +74,6 @@ class MathNodeView implements NodeView {
 
   destroy(): void {
     this.renderGen += 1;
-    this.stopObserve();
   }
 
   private enterEdit(): void {
@@ -96,6 +81,7 @@ class MathNodeView implements NodeView {
       return;
     }
     this.editing = true;
+    this.previewing = false;
     this.renderGen += 1;
     const field = this.display
       ? document.createElement("textarea")
@@ -126,19 +112,14 @@ class MathNodeView implements NodeView {
       }
       this.tex = next;
     }
-    if (this.visible) {
-      this.showPreview();
-    } else {
-      this.showPlaceholder();
-    }
-  }
-
-  private showPlaceholder(): void {
-    this.renderGen += 1;
-    this.dom.textContent = mathPlaceholderText(this.tex, this.display);
+    this.showPreview();
   }
 
   private showPreview(): void {
+    if (this.previewing) {
+      return;
+    }
+    this.previewing = true;
     const gen = ++this.renderGen;
     const cached = peekRenderedTex(this.tex, this.display);
     if (cached !== null) {
@@ -147,7 +128,7 @@ class MathNodeView implements NodeView {
     }
     this.dom.textContent = mathPlaceholderText(this.tex, this.display);
     void renderTex(this.tex, this.display, this.view.dom).then((node) => {
-      if (gen !== this.renderGen || this.editing || !this.visible) {
+      if (gen !== this.renderGen || this.editing) {
         return;
       }
       this.dom.replaceChildren(node);

@@ -1,12 +1,11 @@
 /**
- * HTML NodeView：视口内才消毒预览；点进去改源码，失焦才写回 attr。
- * 预览只改 this.dom，不 dispatch；渲染不得标 dirty。
+ * HTML NodeView：打开时消毒预览，滚动不再卸以免高度抖动。
+ * 点进去改源码，失焦才写回 attr。预览只改 this.dom，不 dispatch；渲染不得标 dirty。
  */
 import type { Node as PmNode } from "prosemirror-model";
 import type { EditorView, NodeView, NodeViewConstructor } from "prosemirror-view";
 import { sanitizeHtml } from "./html";
 import { rewriteMediaSrcs } from "./media";
-import { observeViewport } from "./viewport";
 
 /**
  * 预览 / 源码两态。消毒结果只进 DOM；只有用户改了 html 才写回 attr。
@@ -16,11 +15,10 @@ class HtmlNodeView implements NodeView {
   private html: string;
   private readonly display: boolean;
   private editing = false;
-  private visible = false;
+  private previewing = false;
   private sourceEl: HTMLTextAreaElement | HTMLInputElement | null = null;
   private renderGen = 0;
   private blobs: string[] = [];
-  private readonly stopObserve: () => void;
 
   constructor(
     node: PmNode,
@@ -35,18 +33,7 @@ class HtmlNodeView implements NodeView {
     this.dom.dataset.htmlSrc = this.html;
     this.dom.dataset.htmlDisplay = this.display ? "true" : "false";
     this.dom.contentEditable = "false";
-    this.showPlaceholder();
-    this.stopObserve = observeViewport(this.dom, (visible) => {
-      this.visible = visible;
-      if (this.editing) {
-        return;
-      }
-      if (visible) {
-        this.showPreview();
-      } else {
-        this.showPlaceholder();
-      }
-    });
+    this.showPreview();
   }
 
   selectNode(): void {
@@ -67,13 +54,10 @@ class HtmlNodeView implements NodeView {
       return true;
     }
     this.html = next;
+    this.previewing = false;
     this.dom.dataset.htmlSrc = next;
     if (!this.editing) {
-      if (this.visible) {
-        this.showPreview();
-      } else {
-        this.showPlaceholder();
-      }
+      this.showPreview();
     }
     return true;
   }
@@ -88,7 +72,6 @@ class HtmlNodeView implements NodeView {
 
   destroy(): void {
     this.renderGen += 1;
-    this.stopObserve();
     this.revokeBlobs();
   }
 
@@ -97,6 +80,7 @@ class HtmlNodeView implements NodeView {
       return;
     }
     this.editing = true;
+    this.previewing = false;
     this.renderGen += 1;
     this.revokeBlobs();
     const field = this.display
@@ -128,20 +112,14 @@ class HtmlNodeView implements NodeView {
       }
       this.html = next;
     }
-    if (this.visible) {
-      this.showPreview();
-    } else {
-      this.showPlaceholder();
-    }
-  }
-
-  private showPlaceholder(): void {
-    this.renderGen += 1;
-    this.revokeBlobs();
-    this.dom.textContent = this.html;
+    this.showPreview();
   }
 
   private showPreview(): void {
+    if (this.previewing) {
+      return;
+    }
+    this.previewing = true;
     const gen = ++this.renderGen;
     this.revokeBlobs();
     this.dom.replaceChildren(sanitizeHtml(this.html));
@@ -153,7 +131,7 @@ class HtmlNodeView implements NodeView {
       }
       return url;
     }).then(() => {
-      if (gen !== this.renderGen || this.editing || !this.visible) {
+      if (gen !== this.renderGen || this.editing) {
         for (const url of blobs) {
           URL.revokeObjectURL(url);
         }

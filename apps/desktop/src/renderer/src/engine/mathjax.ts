@@ -1,6 +1,6 @@
 /**
  * 公式排版入口：有 math_* 才动态加载 MathJax；结果进 LRU，渲染不得改文档。
- * 视口外不排版；样式在第一次 convert 时挂到编辑器根。
+ * 打开时排版；样式在第一次 convert 时挂到编辑器根。
  */
 import type { MathJaxEngine } from "./mathjax-engine";
 
