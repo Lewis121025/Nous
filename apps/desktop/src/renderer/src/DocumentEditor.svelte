@@ -5,15 +5,21 @@
   import { baseKeymap } from "prosemirror-commands";
   import { undo, redo, history } from "prosemirror-history";
   import { keymap } from "prosemirror-keymap";
-  import { EditorState } from "prosemirror-state";
+  import { EditorState, TextSelection } from "prosemirror-state";
   import { EditorView } from "prosemirror-view";
   import "prosemirror-view/style/prosemirror.css";
   import type { MarkdownEditorApi } from "./engine/editor-api";
+  import { createHtmlNodeViews } from "./engine/html-view";
+  import { createImageNodeViews } from "./engine/image-view";
   import { mathInputPlugins, mathNodeViews } from "./engine/math-view";
   import { warmupMath } from "./engine/mathjax";
   import { parseMarkdown, serializeMarkdown } from "./engine/markdown";
+  import { browserMediaIo, resolveMediaUrl } from "./engine/media";
+  import { collectOutline, type OutlineItem } from "./engine/outline";
 
   type Props = {
+    /** 当前笔记的库内相对路径，用来解析相对图片。 */
+    path: string;
     /** 打开文件时的 Markdown 文本；变化则重建视图。 */
     source: string;
     /** 文档被用户改动时调用。 */
@@ -27,21 +33,27 @@
      * @param raw 目标原文（wiki 名为 target，md 为 href）。
      */
     onOpenLink: (kind: "wiki" | "md", raw: string) => void;
+    /** 文档大纲变化时调用；卸载时传空数组。 */
+    onOutline: (items: OutlineItem[]) => void;
     /** 注册/注销序列化入口。 */
     register: (api: MarkdownEditorApi | null) => void;
   };
 
-  let { source, onDirty, onSave, onOpenLink, register }: Props = $props();
+  let { path, source, onDirty, onSave, onOpenLink, onOutline, register }: Props = $props();
   let host: HTMLDivElement | undefined = $state();
 
   $effect(() => {
     const el = host;
     const src = source;
+    const notePath = path;
     if (el === undefined) {
       return;
     }
     let cancelled = false;
     let view: EditorView | undefined;
+    const loadMd = (raw: string) => resolveMediaUrl(notePath, raw, "md", browserMediaIo);
+    const loadAny = (raw: string, kind: "md" | "wiki") =>
+      resolveMediaUrl(notePath, raw, kind, browserMediaIo);
     void (async () => {
       const doc = parseMarkdown(src);
       await warmupMath(doc, el);
@@ -49,69 +61,88 @@
         return;
       }
       const created = new EditorView(el, {
-        state: EditorState.create({
-          doc,
-          plugins: [
-            history(),
-            ...mathInputPlugins(),
-            keymap({
-              "Mod-s": () => {
-                onSave();
-                return true;
-              },
-              "Mod-z": undo,
-              "Mod-y": redo,
-              "Mod-Shift-z": redo,
-            }),
-            keymap(baseKeymap),
-          ],
-        }),
-        nodeViews: mathNodeViews,
-        handleClickOn(_view, _pos, node) {
-          if (node.type.name !== "wiki_link") {
-            return false;
-          }
-          const target = String(node.attrs["target"] ?? "");
-          if (target !== "") {
-            onOpenLink("wiki", target);
-          }
-          return true;
-        },
-        handleClick(_view, _pos, event) {
-          const target = event.target;
-          if (!(target instanceof Element)) {
-            return false;
-          }
-          const anchor = target.closest("a[href]");
-          if (!(anchor instanceof HTMLAnchorElement)) {
-            return false;
-          }
-          event.preventDefault();
-          const href = anchor.getAttribute("href") ?? "";
-          if (href === "" || isExternalHref(href)) {
+          state: EditorState.create({
+            doc,
+            plugins: [
+              history(),
+              ...mathInputPlugins(),
+              keymap({
+                "Mod-s": () => {
+                  onSave();
+                  return true;
+                },
+                "Mod-z": undo,
+                "Mod-y": redo,
+                "Mod-Shift-z": redo,
+              }),
+              keymap(baseKeymap),
+            ],
+          }),
+          nodeViews: {
+            ...mathNodeViews,
+            ...createHtmlNodeViews(loadMd),
+            ...createImageNodeViews(loadAny),
+          },
+          handleClickOn(_view, _pos, node) {
+            if (node.type.name !== "wiki_link") {
+              return false;
+            }
+            const target = String(node.attrs["target"] ?? "");
+            if (target !== "") {
+              onOpenLink("wiki", target);
+            }
             return true;
-          }
-          onOpenLink("md", href);
-          return true;
-        },
-        dispatchTransaction(tr) {
-          created.updateState(created.state.apply(tr));
-          if (tr.docChanged) {
-            onDirty();
-          }
-        },
-      });
-      if (cancelled) {
-        created.destroy();
-        return;
-      }
-      view = created;
-      register({
-        serialize: () => serializeMarkdown(created.state.doc),
-      });
+          },
+          handleClick(_view, _pos, event) {
+            const target = event.target;
+            if (!(target instanceof Element)) {
+              return false;
+            }
+            const anchor = target.closest("a[href]");
+            if (!(anchor instanceof HTMLAnchorElement)) {
+              return false;
+            }
+            event.preventDefault();
+            const href = anchor.getAttribute("href") ?? "";
+            if (href === "" || isExternalHref(href)) {
+              return true;
+            }
+            onOpenLink("md", href);
+            return true;
+          },
+          dispatchTransaction(tr) {
+            const next = created.state.apply(tr);
+            created.updateState(next);
+            if (tr.docChanged) {
+              onDirty();
+              onOutline(collectOutline(next.doc));
+            }
+          },
+        });
+        if (cancelled) {
+          created.destroy();
+          return;
+        }
+        view = created;
+        onOutline(collectOutline(created.state.doc));
+        register({
+          serialize: () => serializeMarkdown(created.state.doc),
+          jumpTo: (pos) => {
+            const { doc } = created.state;
+            if (pos < 0 || pos >= doc.content.size) {
+              return;
+            }
+            const resolved = doc.resolve(Math.min(pos + 1, doc.content.size));
+            created.dispatch(
+              created.state.tr.setSelection(TextSelection.near(resolved)).scrollIntoView(),
+            );
+            created.focus();
+          },
+        });
     })();
     return () => {
       cancelled = true;
+      onOutline([]);
       register(null);
       view?.destroy();
       el.replaceChildren();
@@ -159,7 +190,47 @@
     cursor: text;
   }
 
-  .surface :global(.math-source) {
+  .surface :global(.html-inline) {
+    display: inline;
+    cursor: text;
+  }
+
+  .surface :global(.html-block) {
+    display: block;
+    margin: 0.5rem 0;
+    cursor: text;
+  }
+
+  .surface :global(.note-image) {
+    max-width: 100%;
+    height: auto;
+    vertical-align: middle;
+  }
+
+  .surface :global(table) {
+    border-collapse: collapse;
+  }
+
+  .surface :global(th),
+  .surface :global(td) {
+    border: 1px solid var(--border);
+    padding: 0.2rem 0.5rem;
+  }
+
+  .surface :global(li[data-checked]) {
+    list-style: none;
+  }
+
+  .surface :global(li[data-checked="false"])::before {
+    content: "☐ ";
+  }
+
+  .surface :global(li[data-checked="true"])::before {
+    content: "☑ ";
+  }
+
+  .surface :global(.math-source),
+  .surface :global(.html-source) {
     display: block;
     width: 100%;
     box-sizing: border-box;

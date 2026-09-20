@@ -1,9 +1,11 @@
 import { join } from "node:path";
 import { BrowserWindow, app, screen } from "electron";
+import { createCloseGate, onCloseAttempt, resetCloseGate, type CloseGate } from "./close-gate";
 import { registerIpc } from "./ipc";
 import { loadSession, patchSession, sessionFile, type WindowSession } from "./session";
 
 let mainWindow: BrowserWindow | null = null;
+const closeGate: CloseGate = createCloseGate();
 
 function sessionPath(): string {
   return sessionFile(app.getPath("userData"));
@@ -33,6 +35,10 @@ function clampWindow(stored: WindowSession): Electron.Rectangle {
     y = area.y + Math.floor((area.height - height) / 2);
   }
   return { x, y, width, height };
+}
+
+function rendererCanFlush(win: BrowserWindow | null): boolean {
+  return win !== null && !win.webContents.isDestroyed() && !win.webContents.isLoadingMainFrame();
 }
 
 function persistWindow(win: BrowserWindow): void {
@@ -79,9 +85,21 @@ function createWindow(): void {
     void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
   }
 
-  mainWindow.on("close", () => {
+  resetCloseGate(closeGate);
+  mainWindow.on("close", (event) => {
     if (mainWindow !== null) {
       persistWindow(mainWindow);
+    }
+    const action = onCloseAttempt(closeGate, {
+      asQuit: false,
+      rendererReady: rendererCanFlush(mainWindow),
+    });
+    if (action === "proceed") {
+      return;
+    }
+    event.preventDefault();
+    if (action === "prevent-and-send") {
+      mainWindow?.webContents.send("app.flushBeforeClose");
     }
   });
   mainWindow.on("closed", () => {
@@ -90,7 +108,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  registerIpc(() => mainWindow);
+  registerIpc(() => mainWindow, closeGate);
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -102,5 +120,19 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
+  }
+});
+
+app.on("before-quit", (event) => {
+  const action = onCloseAttempt(closeGate, {
+    asQuit: true,
+    rendererReady: rendererCanFlush(mainWindow),
+  });
+  if (action === "proceed") {
+    return;
+  }
+  event.preventDefault();
+  if (action === "prevent-and-send") {
+    mainWindow?.webContents.send("app.flushBeforeClose");
   }
 });

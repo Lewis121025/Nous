@@ -3,6 +3,16 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
+fn vault_with(files: &[(&str, &str)]) -> (TempDir, TempDir, Vault) {
+    let root = TempDir::new().expect("库");
+    let index = TempDir::new().expect("索引");
+    for (name, body) in files {
+        fs::write(root.path().join(name), body).expect("写夹具");
+    }
+    let vault = Vault::open(root.path(), index.path()).expect("打开");
+    (root, index, vault)
+}
+
 fn copy_fixture_dir() -> (TempDir, TempDir, Vault) {
     let root = TempDir::new().expect("库");
     let index = TempDir::new().expect("索引");
@@ -70,4 +80,60 @@ fn links_to_other_includes_source() {
     let sources: Vec<&str> = incoming.iter().map(|l| l.from_path.as_str()).collect();
     assert!(sources.contains(&"source.md"));
     assert!(sources.contains(&"code_and_wiki.md"));
+}
+
+#[test]
+fn multibyte_prefix_does_not_collapse_markdown_link_ranges() {
+    let prefix = "字".repeat(200);
+    let body = format!("{prefix}[a](./t.md) {prefix}[b](./t.md)\n");
+    let (root, _index, vault) = vault_with(&[("t.md", "# t\n"), ("src.md", &body)]);
+    let from = vault.links_from("src.md").expect("出链");
+    assert_eq!(from.len(), 2);
+    assert_ne!(from[0].start_byte, from[1].start_byte);
+    assert_eq!(
+        source_slice(root.path(), "src.md", from[0].start_byte, from[0].end_byte),
+        "[a](./t.md)"
+    );
+    assert_eq!(
+        source_slice(root.path(), "src.md", from[1].start_byte, from[1].end_byte),
+        "[b](./t.md)"
+    );
+}
+
+#[test]
+fn multibyte_prefix_does_not_collapse_wiki_link_ranges() {
+    let prefix = "字".repeat(200);
+    let body = format!("{prefix}[[t]] {prefix}[[t]]\n");
+    let (root, _index, vault) = vault_with(&[("t.md", "# t\n"), ("src.md", &body)]);
+    let from = vault.links_from("src.md").expect("出链");
+    assert_eq!(from.len(), 2);
+    assert!(from.iter().all(|link| link.kind == LinkKind::Wiki));
+    assert_ne!(from[0].start_byte, from[1].start_byte);
+    assert_eq!(
+        source_slice(root.path(), "src.md", from[0].start_byte, from[0].end_byte),
+        "[[t]]"
+    );
+    assert_eq!(
+        source_slice(root.path(), "src.md", from[1].start_byte, from[1].end_byte),
+        "[[t]]"
+    );
+}
+
+#[test]
+fn markdown_and_wiki_fragments_resolve_to_note() {
+    let (_root, _index, vault) = vault_with(&[
+        ("t.md", "# t\n"),
+        (
+            "src.md",
+            "[md](./t.md#sec) [q](./t.md?x=1) [[t#sec]] [[t#sec|别名]]\n",
+        ),
+    ]);
+    let from = vault.links_from("src.md").expect("出链");
+    assert_eq!(from.len(), 4);
+    assert!(from
+        .iter()
+        .all(|link| link.to_path.as_deref() == Some("t.md")));
+
+    let incoming = vault.links_to("t.md").expect("入链");
+    assert_eq!(incoming.len(), 4);
 }

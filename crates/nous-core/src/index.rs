@@ -5,6 +5,21 @@ use rusqlite::{params, Connection};
 use crate::error::Error;
 use crate::link::{LinkKind, LinkRecord};
 
+/// 索引里的一行文件记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileRow {
+    /// 库内相对路径。
+    pub path: String,
+    /// 展示标题。
+    pub title: String,
+    /// `markdown` 或 `other`。
+    pub kind: String,
+    /// 内容修改时间（自纪元起的纳秒）。
+    pub mtime: i64,
+    /// 内容 SHA-256 十六进制。
+    pub content_hash: String,
+}
+
 /// 打开或创建索引库并建表。
 ///
 /// # Errors
@@ -39,14 +54,58 @@ pub fn open_connection(path: &std::path::Path) -> Result<Connection, Error> {
     Ok(conn)
 }
 
+/// 扫描器/解析输出格式。区间或目标解析变了必须加一，已打开的库才会重扫而不是复用旧行。
+pub(crate) const SCAN_VERSION: i32 = 2;
+
+/// 当前索引里记录的扫描器版本；从未写过则为 0。
+pub(crate) fn scan_version(conn: &Connection) -> Result<i32, Error> {
+    Ok(conn.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+}
+
+/// 读出当前全部文件行。
+///
+/// # Errors
+///
+/// `SQLite` 失败时返回错误。
+pub(crate) fn load_files(conn: &Connection) -> Result<Vec<FileRow>, Error> {
+    let mut stmt = conn.prepare("SELECT path, title, kind, mtime, content_hash FROM files")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(FileRow {
+            path: row.get(0)?,
+            title: row.get(1)?,
+            kind: row.get(2)?,
+            mtime: row.get(3)?,
+            content_hash: row.get(4)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// 读出当前全部链接。
+///
+/// # Errors
+///
+/// `SQLite` 失败时返回错误。
+pub(crate) fn load_links(conn: &Connection) -> Result<Vec<LinkRecord>, Error> {
+    query_links(
+        conn,
+        "SELECT from_path, to_raw, to_path, kind, start_byte, end_byte FROM links",
+        None,
+    )
+}
+
 /// 用当前文件集合替换索引。
 ///
 /// # Errors
 ///
 /// `SQLite` 失败时返回错误。
-pub fn replace_all(
+pub(crate) fn replace_all(
     conn: &Connection,
-    files: &[(String, String, String, i64, String)],
+    files: &[FileRow],
     links: &[LinkRecord],
 ) -> Result<(), Error> {
     let tx = conn.unchecked_transaction()?;
@@ -55,8 +114,14 @@ pub fn replace_all(
         let mut insert_file = tx.prepare(
             "INSERT INTO files(path, title, kind, mtime, content_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
-        for (path, title, kind, mtime, hash) in files {
-            insert_file.execute(params![path, title, kind, mtime, hash])?;
+        for file in files {
+            insert_file.execute(params![
+                file.path,
+                file.title,
+                file.kind,
+                file.mtime,
+                file.content_hash
+            ])?;
         }
     }
     {
@@ -76,6 +141,7 @@ pub fn replace_all(
         }
     }
     tx.commit()?;
+    conn.pragma_update(None, "user_version", SCAN_VERSION)?;
     Ok(())
 }
 
@@ -88,7 +154,7 @@ pub fn links_to(conn: &Connection, path: &str) -> Result<Vec<LinkRecord>, Error>
     query_links(
         conn,
         "SELECT from_path, to_raw, to_path, kind, start_byte, end_byte FROM links WHERE to_path = ?1",
-        path,
+        Some(path),
     )
 }
 
@@ -101,36 +167,43 @@ pub fn links_from(conn: &Connection, path: &str) -> Result<Vec<LinkRecord>, Erro
     query_links(
         conn,
         "SELECT from_path, to_raw, to_path, kind, start_byte, end_byte FROM links WHERE from_path = ?1",
-        path,
+        Some(path),
     )
 }
 
-fn query_links(conn: &Connection, sql: &str, path: &str) -> Result<Vec<LinkRecord>, Error> {
+fn query_links(conn: &Connection, sql: &str, path: Option<&str>) -> Result<Vec<LinkRecord>, Error> {
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![path], |row| {
-        let kind_raw: String = row.get(3)?;
-        let kind = kind_raw.parse::<LinkKind>().map_err(|()| {
-            rusqlite::Error::FromSqlConversionFailure(
-                3,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "未知链接种类",
-                )),
-            )
-        })?;
-        Ok(LinkRecord {
-            from_path: row.get(0)?,
-            to_raw: row.get(1)?,
-            to_path: row.get(2)?,
-            kind,
-            start_byte: row.get(4)?,
-            end_byte: row.get(5)?,
-        })
-    })?;
     let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
+    if let Some(path) = path {
+        for row in stmt.query_map(params![path], map_link_row)? {
+            out.push(row?);
+        }
+    } else {
+        for row in stmt.query_map([], map_link_row)? {
+            out.push(row?);
+        }
     }
     Ok(out)
+}
+
+fn map_link_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkRecord> {
+    let kind_raw: String = row.get(3)?;
+    let kind = kind_raw.parse::<LinkKind>().map_err(|()| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "未知链接种类",
+            )),
+        )
+    })?;
+    Ok(LinkRecord {
+        from_path: row.get(0)?,
+        to_raw: row.get(1)?,
+        to_path: row.get(2)?,
+        kind,
+        start_byte: row.get(4)?,
+        end_byte: row.get(5)?,
+    })
 }

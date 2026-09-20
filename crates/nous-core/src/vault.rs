@@ -1,15 +1,17 @@
 //! 笔记库：根目录约束下的原始字节读写与链接索引。
 
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use std::sync::Mutex;
 
 use crate::error::Error;
-use crate::index;
+use crate::index::{self, FileRow};
 use crate::link::LinkRecord;
 use crate::pathutil::resolve_in_root;
 use crate::scan;
@@ -21,6 +23,8 @@ pub struct Vault {
     root: PathBuf,
     index_dir: PathBuf,
     conn: Mutex<Connection>,
+    /// 索引提交代次：刷新若带着更早快照回来则丢弃，避免盖住已经提交的写入。
+    index_epoch: AtomicU64,
 }
 
 impl Vault {
@@ -47,12 +51,17 @@ impl Vault {
             root,
             index_dir,
             conn: Mutex::new(conn),
+            index_epoch: AtomicU64::new(0),
         };
-        vault.rebuild_index()?;
+        vault.refresh_index()?;
         Ok(vault)
     }
 
-    /// 按磁盘现状重建链接索引。
+    /// 按磁盘现状刷新链接索引。
+    ///
+    /// `mtime` 未变的文件不读内容；内容哈希未变则只更新时间戳。
+    /// 扫描器版本落后时忽略上述跳过，全量重扫。
+    /// 文件集合变了才重算全库链接指向。
     ///
     /// 文件监视在防抖后调用；外部改盘不会走 `write`，必须显式刷新。
     ///
@@ -60,7 +69,81 @@ impl Vault {
     ///
     /// 读盘或写索引失败。
     pub fn refresh_index(&self) -> Result<(), Error> {
-        self.rebuild_index()
+        let files = self.list_files()?;
+        let (indexed_files, indexed_links, stale_scan, epoch) = {
+            let conn = self.lock_conn()?;
+            (
+                index::load_files(&conn)?,
+                index::load_links(&conn)?,
+                index::scan_version(&conn)? != index::SCAN_VERSION,
+                self.index_epoch.load(Ordering::SeqCst),
+            )
+        };
+        let by_path: HashMap<String, FileRow> = indexed_files
+            .into_iter()
+            .map(|row| (row.path.clone(), row))
+            .collect();
+        let mut links_by: HashMap<String, Vec<LinkRecord>> = HashMap::new();
+        for link in indexed_links {
+            links_by
+                .entry(link.from_path.clone())
+                .or_default()
+                .push(link);
+        }
+
+        let disk_set: HashSet<&str> = files.iter().map(String::as_str).collect();
+        let indexed_set: HashSet<&str> = by_path.keys().map(String::as_str).collect();
+        let set_changed = disk_set != indexed_set;
+
+        let mut file_rows = Vec::new();
+        let mut links = Vec::new();
+        for rel in &files {
+            let abs = resolve_in_root(&self.root, rel)?;
+            let meta = fs::metadata(&abs)?;
+            let mtime = mtime_stamp(&meta);
+            if !stale_scan {
+                if let Some(old) = by_path.get(rel) {
+                    if old.mtime == mtime {
+                        file_rows.push(old.clone());
+                        if let Some(existing) = links_by.get(rel) {
+                            links.extend(existing.iter().cloned());
+                        }
+                        continue;
+                    }
+                }
+            }
+            let bytes = fs::read(&abs)?;
+            let hash = hex_sha256(&bytes);
+            if !stale_scan {
+                if let Some(old) = by_path.get(rel) {
+                    if old.content_hash == hash {
+                        let mut updated = old.clone();
+                        updated.mtime = mtime;
+                        file_rows.push(updated);
+                        if let Some(existing) = links_by.get(rel) {
+                            links.extend(existing.iter().cloned());
+                        }
+                        continue;
+                    }
+                }
+            }
+            file_rows.push(file_row_from_bytes(rel, &bytes, mtime));
+            links.extend(extract_resolved(rel, &bytes, &files));
+        }
+
+        if set_changed {
+            for link in &mut links {
+                link.to_path = resolve_against(&files, &link.from_path, &link.to_raw, link.kind);
+            }
+        }
+
+        let conn = self.lock_conn()?;
+        if self.index_epoch.load(Ordering::SeqCst) != epoch {
+            return Ok(());
+        }
+        index::replace_all(&conn, &file_rows, &links)?;
+        self.index_epoch.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, Error> {
@@ -102,8 +185,7 @@ impl Vault {
     /// 路径越界返回 [`Error::PathEscape`]。
     pub fn write(&self, rel: &str, bytes: &[u8]) -> Result<(), Error> {
         self.write_disk(rel, bytes)?;
-        self.rebuild_index()?;
-        Ok(())
+        self.reindex_written(rel, bytes)
     }
 
     fn write_disk(&self, rel: &str, bytes: &[u8]) -> Result<(), Error> {
@@ -263,7 +345,7 @@ impl Vault {
             }
             return Err(Error::from(err));
         }
-        if let Err(err) = self.rebuild_index() {
+        if let Err(err) = self.refresh_index() {
             let _ = fs::rename(&to_abs, &from_abs);
             for (path, bytes) in &snapshots {
                 let _ = self.write_disk(path, bytes);
@@ -273,46 +355,84 @@ impl Vault {
         Ok(())
     }
 
-    fn rebuild_index(&self) -> Result<(), Error> {
+    /// 用刚写入的字节更新该文件索引；文件集合变了才重算全库指向。
+    fn reindex_written(&self, rel: &str, bytes: &[u8]) -> Result<(), Error> {
         let files = self.list_files()?;
-        let mut file_rows = Vec::new();
-        let mut links = Vec::new();
-        for rel in &files {
-            let abs = resolve_in_root(&self.root, rel)?;
-            let meta = fs::metadata(&abs)?;
-            let bytes = fs::read(&abs)?;
-            let hash = hex_sha256(&bytes);
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
-            let is_md = Path::new(rel)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-            let kind = if is_md { "markdown" } else { "other" };
-            let title = if is_md {
-                std::str::from_utf8(&bytes)
-                    .ok()
-                    .and_then(scan::first_heading)
-                    .unwrap_or_else(|| file_title_fallback(rel))
-            } else {
-                file_title_fallback(rel)
-            };
-            file_rows.push((rel.clone(), title, kind.to_string(), mtime, hash));
-            if is_md {
-                if let Ok(text) = std::str::from_utf8(&bytes) {
-                    links.extend(scan::extract_links(rel, text));
-                }
+        let disk_set: HashSet<String> = files.iter().cloned().collect();
+        let abs = resolve_in_root(&self.root, rel)?;
+        let mtime = mtime_stamp(&fs::metadata(&abs)?);
+        let row = file_row_from_bytes(rel, bytes, mtime);
+        let new_links = extract_resolved(rel, bytes, &files);
+
+        let conn = self.lock_conn()?;
+        let mut file_rows = index::load_files(&conn)?;
+        let mut links = index::load_links(&conn)?;
+        let indexed_set: HashSet<String> = file_rows.iter().map(|file| file.path.clone()).collect();
+        let set_changed = disk_set != indexed_set;
+        file_rows.retain(|file| disk_set.contains(&file.path));
+        links.retain(|link| disk_set.contains(&link.from_path));
+        file_rows.retain(|file| file.path != rel);
+        file_rows.push(row);
+        links.retain(|link| link.from_path != rel);
+        links.extend(new_links);
+        if set_changed {
+            for link in &mut links {
+                link.to_path = resolve_against(&files, &link.from_path, &link.to_raw, link.kind);
             }
         }
-        for link in &mut links {
-            link.to_path = resolve_against(&files, &link.from_path, &link.to_raw, link.kind);
-        }
-        let conn = self.lock_conn()?;
         index::replace_all(&conn, &file_rows, &links)?;
+        self.index_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+}
+
+fn file_row_from_bytes(rel: &str, bytes: &[u8], mtime: i64) -> FileRow {
+    let is_md = is_markdown(rel);
+    let kind = if is_md { "markdown" } else { "other" };
+    let title = if is_md {
+        std::str::from_utf8(bytes)
+            .ok()
+            .and_then(scan::first_heading)
+            .unwrap_or_else(|| file_title_fallback(rel))
+    } else {
+        file_title_fallback(rel)
+    };
+    FileRow {
+        path: rel.to_string(),
+        title,
+        kind: kind.to_string(),
+        mtime,
+        content_hash: hex_sha256(bytes),
+    }
+}
+
+fn extract_resolved(rel: &str, bytes: &[u8], files: &[String]) -> Vec<LinkRecord> {
+    if !is_markdown(rel) {
+        return Vec::new();
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Vec::new();
+    };
+    let mut links = scan::extract_links(rel, text);
+    for link in &mut links {
+        link.to_path = resolve_against(files, &link.from_path, &link.to_raw, link.kind);
+    }
+    links
+}
+
+fn mtime_stamp(meta: &fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX)
+        })
+}
+
+fn is_markdown(rel: &str) -> bool {
+    Path::new(rel)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
 }
 
 fn file_title_fallback(rel: &str) -> String {
@@ -359,9 +479,10 @@ fn resolve_against(
     raw: &str,
     kind: crate::link::LinkKind,
 ) -> Option<String> {
+    let (path, _) = crate::link::split_resource(raw.trim());
     match kind {
-        crate::link::LinkKind::Wiki => resolve_wiki(files, raw),
-        crate::link::LinkKind::Markdown => resolve_markdown(files, from, raw),
+        crate::link::LinkKind::Wiki => resolve_wiki(files, path),
+        crate::link::LinkKind::Markdown => resolve_markdown(files, from, path),
     }
 }
 

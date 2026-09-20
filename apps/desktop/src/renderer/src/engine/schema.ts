@@ -49,8 +49,32 @@ const nodes: Record<string, NodeSpec> = {
   },
   list_item: {
     content: "paragraph block*",
-    parseDOM: [{ tag: "li" }],
-    toDOM: () => ["li", 0],
+    attrs: { checked: { default: null } },
+    parseDOM: [
+      {
+        tag: "li",
+        getAttrs: (dom) => {
+          if (typeof dom === "string") {
+            return false;
+          }
+          const raw = dom.getAttribute("data-checked");
+          if (raw === "true") {
+            return { checked: true };
+          }
+          if (raw === "false") {
+            return { checked: false };
+          }
+          return { checked: null };
+        },
+      },
+    ],
+    toDOM: (node) => {
+      const checked = node.attrs["checked"];
+      if (checked === true || checked === false) {
+        return ["li", { "data-checked": String(checked) }, 0];
+      }
+      return ["li", 0];
+    },
   },
   code_block: {
     attrs: { params: { default: "" } },
@@ -66,6 +90,34 @@ const nodes: Record<string, NodeSpec> = {
     group: "block",
     parseDOM: [{ tag: "hr" }],
     toDOM: () => ["hr"],
+  },
+  image: {
+    inline: true,
+    atom: true,
+    group: "inline",
+    attrs: {
+      src: { default: "" },
+      alt: { default: "" },
+      title: { default: null },
+      kind: { default: "md" },
+    },
+    parseDOM: [{ tag: "img[data-image-src]", getAttrs: imageDomAttrs }],
+    toDOM: (node) => {
+      const src = String(node.attrs["src"] ?? "");
+      const alt = String(node.attrs["alt"] ?? "");
+      const title = node.attrs["title"];
+      const kind = String(node.attrs["kind"] ?? "md");
+      const attrs: Record<string, string> = {
+        "data-image-src": src,
+        "data-image-kind": kind,
+        alt,
+        class: "note-image",
+      };
+      if (typeof title === "string" && title !== "") {
+        attrs["title"] = title;
+      }
+      return ["img", attrs];
+    },
   },
   wiki_link: {
     inline: true,
@@ -108,6 +160,56 @@ const nodes: Record<string, NodeSpec> = {
     ],
     toDOM: (node) => mathToDom(node, true),
   },
+  html_inline: {
+    inline: true,
+    atom: true,
+    group: "inline",
+    attrs: { html: { default: "" } },
+    // 剪贴板和无 NodeView 时靠 data-* 保住源码；真正画进页面只走 NodeView + 消毒。
+    parseDOM: [
+      {
+        tag: "span[data-html-src]",
+        getAttrs: (dom) => htmlDomAttrs(dom, false),
+      },
+    ],
+    toDOM: (node) => htmlToDom(node, false),
+  },
+  html_block: {
+    atom: true,
+    group: "block",
+    attrs: { html: { default: "" } },
+    parseDOM: [
+      {
+        tag: "div[data-html-src]",
+        getAttrs: (dom) => htmlDomAttrs(dom, true),
+      },
+    ],
+    toDOM: (node) => htmlToDom(node, true),
+  },
+  table: {
+    content: "table_row+",
+    group: "block",
+    isolating: true,
+    parseDOM: [{ tag: "table" }],
+    toDOM: () => ["table", ["tbody", 0]],
+  },
+  table_row: {
+    content: "(table_header | table_cell)+",
+    parseDOM: [{ tag: "tr" }],
+    toDOM: () => ["tr", 0],
+  },
+  table_header: {
+    content: "inline*",
+    attrs: { align: { default: null } },
+    parseDOM: [{ tag: "th", getAttrs: cellAlignAttrs }],
+    toDOM: (node) => ["th", cellAlignDom(node), 0],
+  },
+  table_cell: {
+    content: "inline*",
+    attrs: { align: { default: null } },
+    parseDOM: [{ tag: "td", getAttrs: cellAlignAttrs }],
+    toDOM: (node) => ["td", cellAlignDom(node), 0],
+  },
   text: { group: "inline" },
   hard_break: {
     inline: true,
@@ -147,9 +249,74 @@ function mathToDom(node: { attrs: Record<string, unknown> }, display: boolean): 
   ];
 }
 
+/** 从降级 DOM 读回 HTML 源；display 必须与节点种类一致。 */
+function htmlDomAttrs(dom: string | HTMLElement, display: boolean) {
+  if (typeof dom === "string") {
+    return false;
+  }
+  const isDisplay = dom.getAttribute("data-html-display") === "true";
+  if (isDisplay !== display) {
+    return false;
+  }
+  return { html: dom.getAttribute("data-html-src") ?? "" };
+}
+
+/** 降级 DOM 只带源码，不把未消毒 HTML 当作子树。 */
+function htmlToDom(node: { attrs: Record<string, unknown> }, display: boolean): DOMOutputSpec {
+  const html = String(node.attrs["html"] ?? "");
+  const tag = display ? "div" : "span";
+  const className = display ? "html-block" : "html-inline";
+  return [
+    tag,
+    {
+      "data-html-src": html,
+      "data-html-display": display ? "true" : "false",
+      class: className,
+    },
+    html,
+  ];
+}
+
+/** 从降级 img 读回源地址；真正加载走 NodeView。 */
+function imageDomAttrs(dom: string | HTMLElement) {
+  if (typeof dom === "string") {
+    return false;
+  }
+  const title = dom.getAttribute("title");
+  return {
+    src: dom.getAttribute("data-image-src") ?? "",
+    alt: dom.getAttribute("alt") ?? "",
+    title: title === null || title === "" ? null : title,
+    kind: dom.getAttribute("data-image-kind") ?? "md",
+  };
+}
+
+function cellAlignAttrs(dom: string | HTMLElement) {
+  if (typeof dom === "string") {
+    return false;
+  }
+  const align = dom.getAttribute("data-align");
+  if (align === "left" || align === "right" || align === "center") {
+    return { align };
+  }
+  return { align: null };
+}
+
+function cellAlignDom(node: { attrs: Record<string, unknown> }): Record<string, string> {
+  const align = node.attrs["align"];
+  if (align === "left" || align === "right" || align === "center") {
+    return { "data-align": align, style: `text-align: ${align}` };
+  }
+  return {};
+}
+
 const marks: Record<string, MarkSpec> = {
   em: { parseDOM: [{ tag: "em" }, { tag: "i" }], toDOM: () => ["em", 0] },
   strong: { parseDOM: [{ tag: "strong" }, { tag: "b" }], toDOM: () => ["strong", 0] },
+  strike: {
+    parseDOM: [{ tag: "del" }, { tag: "s" }, { tag: "strike" }],
+    toDOM: () => ["del", 0],
+  },
   code: { parseDOM: [{ tag: "code" }], toDOM: () => ["code", 0] },
   link: {
     attrs: { href: { default: "" }, title: { default: null } },

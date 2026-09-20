@@ -50,3 +50,14 @@ pub struct LinkRecord {
     /// 区间终点（不含）。
     pub end_byte: i64,
 }
+
+/// 从链接目标里分出资源路径与 `?`/`#` 后缀。
+///
+/// 解析只认路径；改写必须把后缀拼回原文，否则锚点会丢。
+#[must_use]
+pub(crate) fn split_resource(raw: &str) -> (&str, &str) {
+    match raw.find(['?', '#']) {
+        Some(index) => raw.split_at(index),
+        None => (raw, ""),
+    }
+}

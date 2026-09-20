@@ -1,5 +1,5 @@
 /**
- * 主进程会话：上次的库、打开的文件、窗口几何。
+ * 主进程会话：上次的库、打开的文件、窗口几何、侧栏收起。
  *
  * 只给主进程读写；渲染进程不能提交任意库路径。损坏或缺失的文件视为空会话。
  */
@@ -20,6 +20,10 @@ export type Session = {
   vaultRoot: string | null;
   currentPath: string | null;
   window: WindowSession | null;
+  /** 左侧文件栏是否收起。 */
+  filesCollapsed: boolean;
+  /** 右侧目录栏是否收起。 */
+  outlineCollapsed: boolean;
 };
 
 /** 没有任何记忆时的空会话。 */
@@ -27,6 +31,8 @@ export const emptySession: Session = {
   vaultRoot: null,
   currentPath: null,
   window: null,
+  filesCollapsed: false,
+  outlineCollapsed: false,
 };
 
 /**
@@ -66,6 +72,10 @@ function parseWindow(value: unknown): WindowSession | null {
   };
 }
 
+function parseCollapsed(value: unknown): boolean {
+  return value === true;
+}
+
 function parseNullableString(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
@@ -89,6 +99,8 @@ export function parseSession(raw: string): Session | null {
     vaultRoot: "vaultRoot" in data ? parseNullableString(data.vaultRoot) : null,
     currentPath: "currentPath" in data ? parseNullableString(data.currentPath) : null,
     window: "window" in data ? parseWindow(data.window) : null,
+    filesCollapsed: "filesCollapsed" in data ? parseCollapsed(data.filesCollapsed) : false,
+    outlineCollapsed: "outlineCollapsed" in data ? parseCollapsed(data.outlineCollapsed) : false,
   };
 }
 

@@ -48,6 +48,10 @@ function serializeBlock(node: PmNode, indent: number): string {
       // TeX 不能走 escapeText，否则 `\` 会被改写，二次解析对不上。
       return `$$\n${tex}\n$$`;
     }
+    case "html_block":
+      return String(node.attrs["html"] ?? "");
+    case "table":
+      return serializeTable(node);
     default:
       return serializeInline(node);
   }
@@ -65,7 +69,9 @@ function serializeList(node: PmNode, indent: number, ordered: boolean): string {
   const lines: string[] = [];
   let index = ordered ? Number(node.attrs["order"] ?? 1) : 0;
   node.forEach((item) => {
-    const marker = ordered ? `${index}. ` : "- ";
+    const checked = item.attrs["checked"];
+    const box = checked === true ? "[x] " : checked === false ? "[ ] " : "";
+    const marker = ordered ? `${index}. ${box}` : `- ${box}`;
     index += 1;
     const itemText = serializeListItem(item, indent, marker);
     lines.push(itemText);
@@ -114,6 +120,14 @@ function serializeInline(node: PmNode): string {
       out += `$${String(child.attrs["tex"] ?? "")}$`;
       return;
     }
+    if (child.type.name === "html_inline") {
+      out += String(child.attrs["html"] ?? "");
+      return;
+    }
+    if (child.type.name === "image") {
+      out += serializeMarked(serializeImage(child), child.marks);
+      return;
+    }
     if (child.type.name === "hard_break") {
       out += "  \n";
       return;
@@ -126,13 +140,69 @@ function serializeInline(node: PmNode): string {
 }
 
 function serializeTextNode(node: PmNode): string {
-  const text = node.text ?? "";
-  const marks = [...node.marks].sort((a, b) => a.type.name.localeCompare(b.type.name));
-  let wrapped = escapeText(text, marks);
-  for (const mark of marks) {
+  return serializeMarked(escapeText(node.text ?? "", node.marks), node.marks);
+}
+
+function serializeMarked(inner: string, marks: readonly Mark[]): string {
+  const sorted = [...marks].sort((a, b) => a.type.name.localeCompare(b.type.name));
+  let wrapped = inner;
+  for (const mark of sorted) {
     wrapped = wrapMark(mark, wrapped);
   }
   return wrapped;
+}
+
+function serializeImage(node: PmNode): string {
+  const src = String(node.attrs["src"] ?? "");
+  const alt = String(node.attrs["alt"] ?? "");
+  const title = node.attrs["title"];
+  if (node.attrs["kind"] === "wiki") {
+    if (alt !== "") {
+      return `![[${src}|${alt}]]`;
+    }
+    return `![[${src}]]`;
+  }
+  if (typeof title === "string" && title !== "") {
+    return `![${alt}](${src} "${escapeAttr(title)}")`;
+  }
+  return `![${alt}](${src})`;
+}
+
+function serializeTable(node: PmNode): string {
+  const rows: string[][] = [];
+  const aligns: (string | null)[] = [];
+  node.forEach((row, rowIndex) => {
+    const cells: string[] = [];
+    row.forEach((cell) => {
+      if (rowIndex === 0) {
+        const align = cell.attrs["align"];
+        aligns.push(typeof align === "string" ? align : null);
+      }
+      cells.push(serializeInline(cell).replace(/\|/g, "\\|"));
+    });
+    rows.push(cells);
+  });
+  const width = Math.max(aligns.length, ...rows.map((row) => row.length), 1);
+  const pad = (row: string[]): string[] =>
+    Array.from({ length: width }, (_, index) => row[index] ?? "");
+  const line = (cells: string[]): string => `| ${cells.join(" | ")} |`;
+  const header = pad(rows[0] ?? []);
+  const body = rows.slice(1).map(pad);
+  const sep = Array.from({ length: width }, (_, index) => alignRule(aligns[index] ?? null));
+  return [line(header), `| ${sep.join(" | ")} |`, ...body.map(line)].join("\n");
+}
+
+function alignRule(align: string | null): string {
+  if (align === "left") {
+    return ":---";
+  }
+  if (align === "right") {
+    return "---:";
+  }
+  if (align === "center") {
+    return ":---:";
+  }
+  return "---";
 }
 
 function wrapMark(mark: Mark, inner: string): string {
@@ -143,6 +213,8 @@ function wrapMark(mark: Mark, inner: string): string {
       return `**${inner}**`;
     case "code":
       return `\`${inner}\``;
+    case "strike":
+      return `~~${inner}~~`;
     case "link": {
       const href = String(mark.attrs["href"] ?? "");
       const title = mark.attrs["title"];

@@ -23,3 +23,32 @@ export function bytesForSave(
   }
   return new TextEncoder().encode(serialize());
 }
+
+/** 写盘成功后的缓冲状态。 */
+export type SaveCommit = {
+  /** 已落到磁盘的字节，作为下次 identity 基准。 */
+  originalBytes: Uint8Array;
+  /** 序列化之后又有编辑则为 true。 */
+  dirty: boolean;
+};
+
+/**
+ * 写盘成功后更新缓冲状态。
+ *
+ * 磁盘基准总是刚写入的字节；只有序列化代次仍是最新时才标干净。
+ *
+ * @param written 本次实际写入的字节。
+ * @param serializedGen 调用序列化时的编辑代次。
+ * @param currentGen 写盘完成后的编辑代次。
+ * @returns 应写回外壳的 `originalBytes` / `dirty`。
+ */
+export function commitSuccessfulWrite(
+  written: Uint8Array,
+  serializedGen: number,
+  currentGen: number,
+): SaveCommit {
+  return {
+    originalBytes: written,
+    dirty: serializedGen !== currentGen,
+  };
+}

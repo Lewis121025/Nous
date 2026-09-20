@@ -18,6 +18,10 @@ name = "vault_unit_identity_write"
 path = "../../tests/vault/unit/identity_write.rs"
 
 [[test]]
+name = "vault_unit_index_refresh"
+path = "../../tests/vault/unit/index_refresh.rs"
+
+[[test]]
 name = "vault_integration_watch"
 path = "../../tests/vault/integration/watch.rs"
 
@@ -30,6 +34,7 @@ name = "links_integration_rename"
 path = "../../tests/links/integration/rename.rs"
 
 [dev-dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 tempfile = "3.23.0"
 
 [dependencies]

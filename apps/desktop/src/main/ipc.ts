@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { app, dialog, ipcMain } from "electron";
 import type { BrowserWindow } from "electron";
-import type { LinkKind, LinkRecord, VaultRestore } from "../shared/api";
+import type { LinkKind, LinkRecord, PaneLayout, VaultRestore } from "../shared/api";
+import { onFlushResult, type CloseGate } from "./close-gate";
 import { loadSession, patchSession, sessionFile } from "./session";
 
 const require = createRequire(import.meta.url);
@@ -68,11 +69,12 @@ function openNativeVault(root: string, getWindow: () => BrowserWindow | null): v
 }
 
 /**
- * 注册主进程 IPC。只转发 `nous-core` 经 napi 暴露的命令。
+ * 注册主进程 IPC。只转发 `nous-core` 经 napi 暴露的命令，以及关窗口冲刷。
  *
  * @param getWindow 用于把监视事件推到当前窗口。
+ * @param closeGate 关窗口闸门；冲刷成功后放行。
  */
-export function registerIpc(getWindow: () => BrowserWindow | null): void {
+export function registerIpc(getWindow: () => BrowserWindow | null, closeGate: CloseGate): void {
   ipcMain.handle("vault.open", async () => {
     const window = getWindow();
     const result = window
@@ -106,6 +108,23 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     patchSession(sessionPath(), { currentPath });
   });
 
+  ipcMain.handle("session.getPanes", (): PaneLayout => {
+    const session = loadSession(sessionPath());
+    return {
+      filesCollapsed: session.filesCollapsed,
+      outlineCollapsed: session.outlineCollapsed,
+    };
+  });
+
+  ipcMain.handle("session.setPanes", (_event, panes: unknown) => {
+    if (typeof panes !== "object" || panes === null) {
+      return;
+    }
+    const filesCollapsed = "filesCollapsed" in panes && panes.filesCollapsed === true;
+    const outlineCollapsed = "outlineCollapsed" in panes && panes.outlineCollapsed === true;
+    patchSession(sessionPath(), { filesCollapsed, outlineCollapsed });
+  });
+
   ipcMain.handle("vault.close", () => {
     native.vaultClose();
   });
@@ -135,5 +154,20 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
 
   ipcMain.handle("entry.rename", (_event, from: string, to: string) => {
     native.entryRename(from, to);
+  });
+
+  ipcMain.handle("app.closeAfterFlush", () => {
+    const action = onFlushResult(closeGate, true);
+    if (action === "quit") {
+      app.quit();
+      return;
+    }
+    if (action === "close") {
+      getWindow()?.close();
+    }
+  });
+
+  ipcMain.handle("app.closeBlocked", () => {
+    onFlushResult(closeGate, false);
   });
 }

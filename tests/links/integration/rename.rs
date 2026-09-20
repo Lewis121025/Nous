@@ -48,3 +48,38 @@ fn rename_refuses_existing_destination_and_leaves_bytes() {
     assert_eq!(fs::read(root.path().join("A.md")).expect("A"), a_before);
     assert_eq!(fs::read(root.path().join("B.md")).expect("B"), b_before);
 }
+
+#[test]
+fn rename_updates_links_after_multibyte_prefix() {
+    let prefix = "字".repeat(200);
+    let body = format!("{prefix}[[B]] {prefix}[go](./B.md)\n");
+    let (root, _index, vault) = vault_with(&[("A.md", &body), ("B.md", "# B\n")]);
+
+    vault.rename("B.md", "C.md").expect("改名");
+
+    let a = fs::read_to_string(root.path().join("A.md")).expect("A");
+    assert!(a.contains("[[C]]"));
+    assert!(a.contains("[go](./C.md)"));
+    assert!(!a.contains("[[B]]"));
+    assert!(!a.contains("./B.md"));
+}
+
+#[test]
+fn rename_keeps_markdown_and_wiki_fragments() {
+    let (root, _index, vault) = vault_with(&[
+        ("A.md", "[go](./B.md#sec) [[B#sec]] [[B#sec|别名]]\n"),
+        ("B.md", "# B\n"),
+    ]);
+
+    vault.rename("B.md", "C.md").expect("改名");
+
+    let a = fs::read_to_string(root.path().join("A.md")).expect("A");
+    assert!(a.contains("[go](./C.md#sec)"));
+    assert!(a.contains("[[C#sec]]"));
+    assert!(a.contains("[[C#sec|别名]]"));
+    assert!(!a.contains("B.md"));
+    assert!(!a.contains("[[B"));
+
+    let incoming = vault.links_to("C.md").expect("入链");
+    assert_eq!(incoming.len(), 3);
+}

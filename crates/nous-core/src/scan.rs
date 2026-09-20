@@ -86,8 +86,8 @@ fn markdown_link(
         return None;
     }
     let position = link.position.as_ref()?;
-    let start = i64::try_from(char_offset_to_byte(source, position.start.offset)).ok()?;
-    let end = i64::try_from(char_offset_to_byte(source, position.end.offset)).ok()?;
+    let start = i64::try_from(point_offset_to_byte(source, position.start.offset)).ok()?;
+    let end = i64::try_from(point_offset_to_byte(source, position.end.offset)).ok()?;
     Some(LinkRecord {
         from_path: from_path.to_string(),
         to_raw: url.to_string(),
@@ -107,7 +107,7 @@ fn collect_wiki(
     let Some(position) = text.position.as_ref() else {
         return;
     };
-    let text_start = char_offset_to_byte(source, position.start.offset);
+    let text_start = point_offset_to_byte(source, position.start.offset);
     let wiki = wiki_regex();
     for cap in wiki.captures_iter(&text.value) {
         let full = cap.get(0).expect("0");
@@ -137,9 +137,7 @@ fn is_external(url: &str) -> bool {
         || lower.contains("://")
 }
 
-fn char_offset_to_byte(source: &str, offset: usize) -> usize {
-    source
-        .char_indices()
-        .nth(offset)
-        .map_or(source.len(), |(byte, _)| byte)
+/// markdown-rs 的 `Point.offset` 是源 UTF-8 字节下标，不是 Unicode 标量下标。
+fn point_offset_to_byte(source: &str, offset: usize) -> usize {
+    offset.min(source.len())
 }

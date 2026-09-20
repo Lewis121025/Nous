@@ -23,6 +23,14 @@ export type LinkRecord = {
   endByte: number;
 };
 
+/** 左右侧栏是否收起。 */
+export type PaneLayout = {
+  /** 左侧文件栏是否收起。 */
+  filesCollapsed: boolean;
+  /** 右侧目录栏是否收起。 */
+  outlineCollapsed: boolean;
+};
+
 /**
  * 经 IPC 暴露给渲染进程的命令。
  *
@@ -46,6 +54,10 @@ export type NousApi = {
   vaultRestore: () => Promise<VaultRestore | null>;
   /** 把当前打开的相对路径写入会话；`null` 表示没有打开文件。 */
   sessionSetCurrent: (path: string | null) => Promise<void>;
+  /** 读取侧栏收起状态。 */
+  sessionGetPanes: () => Promise<PaneLayout>;
+  /** 记住侧栏收起状态。 */
+  sessionSetPanes: (panes: PaneLayout) => Promise<void>;
   /** 关闭当前库。 */
   vaultClose: () => Promise<void>;
   /** 列出库内相对路径。 */
@@ -68,4 +80,14 @@ export type NousApi = {
    * @returns 取消订阅。
    */
   subscribeVaultChanged: (callback: () => void) => () => void;
+  /**
+   * 关窗口前主进程会发冲刷请求；渲染进程应先保存再决定是否放行。
+   *
+   * @returns 取消订阅。
+   */
+  subscribeFlushBeforeClose: (callback: () => void) => () => void;
+  /** 冲刷成功后允许窗口关闭。 */
+  closeAfterFlush: () => Promise<void>;
+  /** 冲刷失败，取消这次退出意图，窗口留着。 */
+  closeBlocked: () => Promise<void>;
 };

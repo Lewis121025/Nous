@@ -5,8 +5,12 @@
   import { onMount } from "svelte";
   import CodeEditor from "./CodeEditor.svelte";
   import DocumentEditor from "./DocumentEditor.svelte";
+  import OutlineTree from "./OutlineTree.svelte";
   import type { CodeEditorApi, MarkdownEditorApi } from "./engine/editor-api";
-  import { bytesForSave } from "./engine/save";
+  import { createAutosave } from "./engine/autosave";
+  import { buildOutlineTree, outlineEquals, type OutlineItem } from "./engine/outline";
+  import { shouldApplyReload } from "./engine/reload";
+  import { bytesForSave, commitSuccessfulWrite } from "./engine/save";
   import type { LinkRecord } from "../../shared/api";
 
   let files = $state<string[]>([]);
@@ -19,17 +23,40 @@
   let renameName = $state("");
   let message = $state("");
   let vaultRoot = $state<string | null>(null);
+  let outline = $state<OutlineItem[]>([]);
+  let collapsedByFile = $state<Record<string, string[]>>({});
+  let filesCollapsed = $state(false);
+  let outlineCollapsed = $state(false);
 
   let markdownApi: MarkdownEditorApi | null = null;
   let codeApi: CodeEditorApi | null = null;
 
   const decoder = new TextDecoder();
+  let editGen = 0;
+  const outlineTree = $derived(buildOutlineTree(outline));
+  const collapsedKeys = $derived(current === null ? [] : (collapsedByFile[current] ?? []));
+
+  const autosave = createAutosave({
+    isDirty: () => dirty,
+    save: persist,
+  });
 
   onMount(() => {
-    void restoreSession();
-    return window.nous.subscribeVaultChanged(() => {
+    void (async () => {
+      await restorePanes();
+      await restoreSession();
+    })();
+    const unsubscribeVault = window.nous.subscribeVaultChanged(() => {
       void onVaultChanged();
     });
+    const unsubscribeClose = window.nous.subscribeFlushBeforeClose(() => {
+      void onFlushBeforeClose();
+    });
+    return () => {
+      autosave.dispose();
+      unsubscribeVault();
+      unsubscribeClose();
+    };
   });
 
   /**
@@ -40,6 +67,8 @@
   function isMarkdown(path: string): boolean {
     return path.toLowerCase().endsWith(".md");
   }
+
+  const canOutline = $derived(current !== null && isMarkdown(current));
 
   function basename(path: string): string {
     const slash = path.lastIndexOf("/");
@@ -62,9 +91,13 @@
   }
 
   async function onVaultChanged(): Promise<void> {
+    const pathWhenStarted = current;
     try {
       await refreshList();
     } catch {
+      return;
+    }
+    if (current !== pathWhenStarted) {
       return;
     }
     if (current === null) {
@@ -77,17 +110,57 @@
         source = "";
         backlinks = [];
         deadOutbound = [];
+        outline = [];
         void window.nous.sessionSetCurrent(null);
       }
       return;
     }
     await refreshLinks(current);
-    if (dirty) {
+    if (current !== pathWhenStarted) {
       return;
     }
-    const bytes = await window.nous.fileRead(current);
+    const bytes = await window.nous.fileRead(pathWhenStarted);
+    if (
+      !shouldApplyReload({
+        dirty,
+        currentPath: current,
+        pathWhenStarted,
+        original: originalBytes,
+        disk: bytes,
+      })
+    ) {
+      return;
+    }
     originalBytes = bytes;
     source = decoder.decode(bytes);
+  }
+
+  /**
+   * 启动时读回侧栏收起状态。
+   */
+  async function restorePanes(): Promise<void> {
+    try {
+      const panes = await window.nous.sessionGetPanes();
+      filesCollapsed = panes.filesCollapsed;
+      outlineCollapsed = panes.outlineCollapsed;
+    } catch {
+      filesCollapsed = false;
+      outlineCollapsed = false;
+    }
+  }
+
+  function persistPanes(): void {
+    void window.nous.sessionSetPanes({ filesCollapsed, outlineCollapsed });
+  }
+
+  function toggleFilesPane(): void {
+    filesCollapsed = !filesCollapsed;
+    persistPanes();
+  }
+
+  function toggleOutlinePane(): void {
+    outlineCollapsed = !outlineCollapsed;
+    persistPanes();
   }
 
   /**
@@ -112,6 +185,13 @@
   }
 
   async function openVault(): Promise<void> {
+    await autosave.flush();
+    if (dirty) {
+      if (message === "") {
+        message = "请先保存再打开其他库";
+      }
+      return;
+    }
     try {
       const root = await window.nous.vaultOpen();
       if (root === null) {
@@ -125,6 +205,7 @@
       backlinks = [];
       deadOutbound = [];
       message = "";
+      outline = [];
       await refreshList();
     } catch (err) {
       message = err instanceof Error ? err.message : "打开库失败";
@@ -135,8 +216,11 @@
     if (path === current) {
       return;
     }
+    await autosave.flush();
     if (dirty) {
-      message = "请先保存再打开其他文件";
+      if (message === "") {
+        message = "请先保存再打开其他文件";
+      }
       return;
     }
     const bytes = await window.nous.fileRead(path);
@@ -152,27 +236,56 @@
 
   function markDirty(): void {
     dirty = true;
+    editGen += 1;
+    autosave.touch();
   }
 
   function requestSave(): void {
-    void save();
+    void autosave.flush();
   }
 
   function requestOpenLink(kind: "wiki" | "md", raw: string): void {
     void openLink(kind, raw);
   }
 
+  function setOutline(items: OutlineItem[]): void {
+    if (outlineEquals(outline, items)) {
+      return;
+    }
+    outline = items;
+  }
+
+  function jumpOutline(pos: number): void {
+    markdownApi?.jumpTo(pos);
+  }
+
+  function toggleOutline(key: string): void {
+    const path = current;
+    if (path === null) {
+      return;
+    }
+    const currentKeys = collapsedByFile[path] ?? [];
+    const next = currentKeys.includes(key)
+      ? currentKeys.filter((item) => item !== key)
+      : [...currentKeys, key];
+    collapsedByFile = { ...collapsedByFile, [path]: next };
+  }
+
   function registerMarkdown(api: MarkdownEditorApi | null): void {
     markdownApi = api;
+    if (api === null) {
+      outline = [];
+    }
   }
 
   function registerCode(api: CodeEditorApi | null): void {
     codeApi = api;
   }
 
-  async function save(): Promise<void> {
+  async function persist(): Promise<void> {
     const path = current;
     const original = originalBytes;
+    const gen = editGen;
     if (path === null || original === null) {
       return;
     }
@@ -191,21 +304,42 @@
     try {
       const bytes = bytesForSave(dirty, original, serialize);
       await window.nous.fileWrite(path, bytes);
-      originalBytes = bytes;
-      dirty = false;
+      if (current !== path) {
+        return;
+      }
+      const commit = commitSuccessfulWrite(bytes, gen, editGen);
+      originalBytes = commit.originalBytes;
+      dirty = commit.dirty;
       message = "";
-      await refreshLinks(path);
+      if (current === path) {
+        await refreshLinks(path);
+      }
     } catch (err) {
       message = err instanceof Error ? err.message : "保存失败";
     }
+  }
+
+  async function onFlushBeforeClose(): Promise<void> {
+    await autosave.flush();
+    if (dirty) {
+      if (message === "") {
+        message = "保存失败，请先手动保存再关闭";
+      }
+      await window.nous.closeBlocked();
+      return;
+    }
+    await window.nous.closeAfterFlush();
   }
 
   async function openLink(kind: "wiki" | "md", raw: string): Promise<void> {
     if (current === null) {
       return;
     }
+    await autosave.flush();
     if (dirty) {
-      message = "请先保存再跳转";
+      if (message === "") {
+        message = "请先保存再跳转";
+      }
       return;
     }
     const to = await window.nous.linksResolve(current, raw, kind);
@@ -220,8 +354,11 @@
     if (current === null) {
       return;
     }
+    await autosave.flush();
     if (dirty) {
-      message = "有未保存修改，拒绝改名";
+      if (message === "") {
+        message = "有未保存修改，拒绝改名";
+      }
       return;
     }
     const name = renameName.trim();
@@ -251,10 +388,19 @@
   }
 </script>
 
-<div class="layout">
+<div class="app">
   <header class="toolbar">
     <button type="button" onclick={() => void openVault()}>打开库</button>
-    <button type="button" onclick={() => void save()} disabled={current === null}>保存</button>
+    <button type="button" onclick={() => void autosave.flush()} disabled={current === null}
+      >保存</button
+    >
+    <button type="button" aria-pressed={!filesCollapsed} onclick={toggleFilesPane}>文件</button>
+    <button
+      type="button"
+      aria-pressed={canOutline && !outlineCollapsed}
+      disabled={!canOutline}
+      onclick={toggleOutlinePane}>目录</button
+    >
     {#if vaultRoot !== null}
       <span class="root" title={vaultRoot}>{vaultRoot}</span>
     {/if}
@@ -263,89 +409,114 @@
     {/if}
   </header>
 
-  <nav class="list" aria-label="文件列表">
-    {#each files as path (path)}
-      <button
-        type="button"
-        class="file"
-        class:active={path === current}
-        onclick={() => void openFile(path)}
-      >
-        {path}
-      </button>
-    {/each}
-  </nav>
-
-  <section class="main">
-    {#if current !== null}
-      {#if isMarkdown(current)}
-        <DocumentEditor
-          {source}
-          onDirty={markDirty}
-          onSave={requestSave}
-          onOpenLink={requestOpenLink}
-          register={registerMarkdown}
-        />
-      {:else}
-        <CodeEditor
-          {source}
-          path={current}
-          onDirty={markDirty}
-          onSave={requestSave}
-          register={registerCode}
-        />
-      {/if}
-
-      <h2>入链</h2>
-      <ul class="backlinks">
-        {#each backlinks as link (`${link.fromPath}:${link.startByte}`)}
-          <li>
-            {#if link.toPath !== null}
-              <button type="button" class="link" onclick={() => void openFile(link.fromPath)}>
-                {link.fromPath}
-              </button>
-            {:else}
-              {link.fromPath}
-            {/if}
-          </li>
-        {/each}
-        {#each deadOutbound as link (`dead:${link.toRaw}:${link.startByte}`)}
-          <li>{link.toRaw}</li>
-        {/each}
-      </ul>
-
-      <form
-        class="rename"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void rename();
-        }}
-      >
-        <label>
-          重命名
-          <input bind:value={renameName} name="rename" />
-        </label>
-        <button type="submit">提交</button>
-      </form>
+  <div class="panes">
+    {#if !filesCollapsed}
+      <nav class="list" aria-label="文件列表">
+        <div class="pane-head">文件</div>
+        <div class="list-body">
+          {#each files as path (path)}
+            <button
+              type="button"
+              class="file"
+              class:active={path === current}
+              onclick={() => void openFile(path)}
+            >
+              {path}
+            </button>
+          {/each}
+        </div>
+      </nav>
     {/if}
-  </section>
+
+    <section class="main">
+      {#if current !== null}
+        {#if isMarkdown(current)}
+          <DocumentEditor
+            path={current}
+            {source}
+            onDirty={markDirty}
+            onSave={requestSave}
+            onOpenLink={requestOpenLink}
+            onOutline={setOutline}
+            register={registerMarkdown}
+          />
+        {:else}
+          <CodeEditor
+            {source}
+            path={current}
+            onDirty={markDirty}
+            onSave={requestSave}
+            register={registerCode}
+          />
+        {/if}
+
+        <h2>入链</h2>
+        <ul class="backlinks">
+          {#each backlinks as link, index (`${link.fromPath}:${link.startByte}:${index}`)}
+            <li>
+              {#if link.toPath !== null}
+                <button type="button" class="link" onclick={() => void openFile(link.fromPath)}>
+                  {link.fromPath}
+                </button>
+              {:else}
+                {link.fromPath}
+              {/if}
+            </li>
+          {/each}
+          {#each deadOutbound as link, index (`dead:${link.toRaw}:${link.startByte}:${index}`)}
+            <li>{link.toRaw}</li>
+          {/each}
+        </ul>
+
+        <form
+          class="rename"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void rename();
+          }}
+        >
+          <label>
+            重命名
+            <input bind:value={renameName} name="rename" />
+          </label>
+          <button type="submit">提交</button>
+        </form>
+      {/if}
+    </section>
+
+    {#if canOutline && !outlineCollapsed}
+      <aside class="outline-pane">
+        <div class="pane-head">目录</div>
+        <nav class="outline" aria-label="文档目录">
+          <OutlineTree
+            nodes={outlineTree}
+            collapsed={collapsedKeys}
+            onToggle={toggleOutline}
+            onJump={jumpOutline}
+          />
+        </nav>
+      </aside>
+    {/if}
+  </div>
 </div>
 
 <style>
-  .layout {
-    display: grid;
-    grid-template-columns: 16rem 1fr;
-    grid-template-rows: auto 1fr;
+  .app {
+    display: flex;
+    flex-direction: column;
     height: 100%;
   }
 
   .toolbar {
-    grid-column: 1 / -1;
     display: flex;
     align-items: center;
     gap: 0.75rem;
     padding: 0.5rem 0.75rem;
     border-bottom: 1px solid var(--border);
+  }
+
+  .toolbar button[aria-pressed="true"] {
+    font-weight: 600;
   }
 
   .root {
@@ -358,9 +529,35 @@
     margin-left: auto;
   }
 
+  /* 文件 | 编辑 | 目录。未挂载的侧栏不占列；开关在顶栏，不随列宽移动。 */
+  .panes {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
   .list {
-    overflow: auto;
+    grid-column: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+    width: 16rem;
     border-right: 1px solid var(--border);
+  }
+
+  .list-body {
+    overflow: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .pane-head {
+    padding: 0.35rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 1rem;
+    font-weight: 600;
   }
 
   .file {
@@ -380,7 +577,9 @@
   }
 
   .main {
+    grid-column: 2;
     overflow: auto;
+    min-height: 0;
     padding: 0.75rem;
   }
 
@@ -393,6 +592,23 @@
   .backlinks {
     margin: 0;
     padding-left: 1.2rem;
+  }
+
+  .outline-pane {
+    grid-column: 3;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+    width: 14rem;
+    border-left: 1px solid var(--border);
+  }
+
+  .outline {
+    overflow: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 0.35rem 0.45rem;
   }
 
   .link {

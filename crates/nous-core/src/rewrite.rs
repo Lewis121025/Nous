@@ -2,7 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::link::LinkKind;
+use crate::link::{split_resource, LinkKind};
 
 /// 根据链接种类生成替换后的源文本片段。
 #[must_use]
@@ -18,10 +18,14 @@ fn rewrite_wiki(original: &str, new_target: &str) -> String {
         .strip_prefix("[[")
         .and_then(|s| s.strip_suffix("]]"))
         .unwrap_or(original);
-    if let Some((_, alias)) = inner.split_once('|') {
-        format!("[[{new_target}|{alias}]]")
-    } else {
-        format!("[[{new_target}]]")
+    let (left, alias) = match inner.split_once('|') {
+        Some((target, alias)) => (target, Some(alias)),
+        None => (inner, None),
+    };
+    let (_, suffix) = split_resource(left);
+    match alias {
+        Some(alias) => format!("[[{new_target}{suffix}|{alias}]]"),
+        None => format!("[[{new_target}{suffix}]]"),
     }
 }
 
@@ -29,9 +33,13 @@ fn rewrite_markdown(original: &str, new_url: &str) -> String {
     let Some(idx) = original.rfind('(') else {
         return original.to_string();
     };
+    let rest = &original[idx + 1..];
+    let url = rest.strip_suffix(')').unwrap_or(rest);
+    let (_, suffix) = split_resource(url);
     let mut out = original[..idx].to_string();
     out.push('(');
     out.push_str(new_url);
+    out.push_str(suffix);
     out.push(')');
     out
 }
