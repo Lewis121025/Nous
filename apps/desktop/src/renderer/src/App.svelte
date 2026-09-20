@@ -273,11 +273,12 @@
     collapsedByFile = { ...collapsedByFile, [path]: next };
   }
 
+  /**
+   * 注册/注销序列化入口。卸载时不要在这里清大纲：onOutline([]) 已经做了。
+   * 若此处再写 outline = []，会和编辑器挂载抢状态。
+   */
   function registerMarkdown(api: MarkdownEditorApi | null): void {
     markdownApi = api;
-    if (api === null) {
-      outline = [];
-    }
   }
 
   function registerCode(api: CodeEditorApi | null): void {

@@ -2,6 +2,7 @@
   /**
    * 可编辑 Markdown 表面：ProseMirror 挂载一次，不把文档树放进 Svelte VDOM。
    */
+  import { untrack } from "svelte";
   import { baseKeymap } from "prosemirror-commands";
   import { undo, redo, history } from "prosemirror-history";
   import { keymap } from "prosemirror-keymap";
@@ -48,92 +49,101 @@
     if (el === undefined) {
       return;
     }
-    let view: EditorView | undefined;
-    const loadMd = (raw: string) => resolveMediaUrl(notePath, raw, "md", browserMediaIo);
-    const loadAny = (raw: string, kind: "md" | "wiki") =>
-      resolveMediaUrl(notePath, raw, kind, browserMediaIo);
-    const doc = parseMarkdown(src);
-    const created = new EditorView(el, {
-      state: EditorState.create({
-        doc,
-        plugins: [
-          history(),
-          ...mathInputPlugins(),
-          keymap({
-            "Mod-s": () => {
-              onSave();
-              return true;
-            },
-            "Mod-z": undo,
-            "Mod-y": redo,
-            "Mod-Shift-z": redo,
-          }),
-          keymap(baseKeymap),
-        ],
-      }),
-      nodeViews: {
-        ...mathNodeViews,
-        ...createHtmlNodeViews(loadMd),
-        ...createImageNodeViews(loadAny),
-      },
-      handleClickOn(_view, _pos, node) {
-        if (node.type.name !== "wiki_link") {
-          return false;
-        }
-        const target = String(node.attrs["target"] ?? "");
-        if (target !== "") {
-          onOpenLink("wiki", target);
-        }
-        return true;
-      },
-      handleClick(_view, _pos, event) {
-        const target = event.target;
-        if (!(target instanceof Element)) {
-          return false;
-        }
-        const anchor = target.closest("a[href]");
-        if (!(anchor instanceof HTMLAnchorElement)) {
-          return false;
-        }
-        event.preventDefault();
-        const href = anchor.getAttribute("href") ?? "";
-        if (href === "" || isExternalHref(href)) {
+    // 先记下 host/path/source。后面创建视图并调用 onOutline：
+    // 回调会读/写外壳的 outline，算进依赖就会「写大纲 → 重跑 effect → 清空 → 再挂载」死循环。
+    return untrack(() => {
+      const save = onSave;
+      const dirty = onDirty;
+      const openLink = onOpenLink;
+      const pushOutline = onOutline;
+      const bindApi = register;
+      let view: EditorView | undefined;
+      const loadMd = (raw: string) => resolveMediaUrl(notePath, raw, "md", browserMediaIo);
+      const loadAny = (raw: string, kind: "md" | "wiki") =>
+        resolveMediaUrl(notePath, raw, kind, browserMediaIo);
+      const doc = parseMarkdown(src);
+      const created = new EditorView(el, {
+        state: EditorState.create({
+          doc,
+          plugins: [
+            history(),
+            ...mathInputPlugins(),
+            keymap({
+              "Mod-s": () => {
+                save();
+                return true;
+              },
+              "Mod-z": undo,
+              "Mod-y": redo,
+              "Mod-Shift-z": redo,
+            }),
+            keymap(baseKeymap),
+          ],
+        }),
+        nodeViews: {
+          ...mathNodeViews,
+          ...createHtmlNodeViews(loadMd),
+          ...createImageNodeViews(loadAny),
+        },
+        handleClickOn(_view, _pos, node) {
+          if (node.type.name !== "wiki_link") {
+            return false;
+          }
+          const target = String(node.attrs["target"] ?? "");
+          if (target !== "") {
+            openLink("wiki", target);
+          }
           return true;
-        }
-        onOpenLink("md", href);
-        return true;
-      },
-      dispatchTransaction(tr) {
-        const next = created.state.apply(tr);
-        created.updateState(next);
-        if (tr.docChanged) {
-          onDirty();
-          onOutline(collectOutline(next.doc));
-        }
-      },
+        },
+        handleClick(_view, _pos, event) {
+          const target = event.target;
+          if (!(target instanceof Element)) {
+            return false;
+          }
+          const anchor = target.closest("a[href]");
+          if (!(anchor instanceof HTMLAnchorElement)) {
+            return false;
+          }
+          event.preventDefault();
+          const href = anchor.getAttribute("href") ?? "";
+          if (href === "" || isExternalHref(href)) {
+            return true;
+          }
+          openLink("md", href);
+          return true;
+        },
+        dispatchTransaction(tr) {
+          const next = created.state.apply(tr);
+          created.updateState(next);
+          if (tr.docChanged) {
+            dirty();
+            pushOutline(collectOutline(next.doc));
+          }
+        },
+      });
+      view = created;
+      pushOutline(collectOutline(created.state.doc));
+      bindApi({
+        serialize: () => serializeMarkdown(created.state.doc),
+        jumpTo: (pos) => {
+          const { doc } = created.state;
+          if (pos < 0 || pos >= doc.content.size) {
+            return;
+          }
+          const resolved = doc.resolve(Math.min(pos + 1, doc.content.size));
+          created.dispatch(
+            created.state.tr.setSelection(TextSelection.near(resolved)).scrollIntoView(),
+          );
+          created.focus();
+        },
+      });
+      return () => {
+        pushOutline([]);
+        bindApi(null);
+        view?.destroy();
+        el.replaceChildren();
+      };
     });
-    view = created;
-    onOutline(collectOutline(created.state.doc));
-    register({
-      serialize: () => serializeMarkdown(created.state.doc),
-      jumpTo: (pos) => {
-        const { doc } = created.state;
-        if (pos < 0 || pos >= doc.content.size) {
-          return;
-        }
-        const resolved = doc.resolve(Math.min(pos + 1, doc.content.size));
-        created.dispatch(
-          created.state.tr.setSelection(TextSelection.near(resolved)).scrollIntoView(),
-        );
-        created.focus();
-      },
-    });
-    return () => {
-      onOutline([]);
-      register(null);
-      view?.destroy();
-      el.replaceChildren();
-    };
   });
 
   function isExternalHref(href: string): boolean {

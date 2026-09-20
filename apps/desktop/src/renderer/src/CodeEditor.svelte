@@ -2,6 +2,7 @@
   /**
    * 可编辑代码表面：CodeMirror 6 挂载一次，文本即文件。
    */
+  import { untrack } from "svelte";
   import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
   import {
     bracketMatching,
@@ -37,63 +38,69 @@
     }
     const currentPath = path;
     const currentSource = source;
-    let cancelled = false;
-    const langConf = new Compartment();
-    const view = new EditorView({
-      parent: el,
-      state: EditorState.create({
-        doc: currentSource,
-        extensions: [
-          history(),
-          keymap.of([
-            {
-              key: "Mod-s",
-              run: () => {
-                onSave();
-                return true;
+    // 先记下 path/source。挂载里调用的 register/onDirty 可能读外壳状态，不能进依赖。
+    return untrack(() => {
+      const save = onSave;
+      const dirty = onDirty;
+      const bindApi = register;
+      let cancelled = false;
+      const langConf = new Compartment();
+      const view = new EditorView({
+        parent: el,
+        state: EditorState.create({
+          doc: currentSource,
+          extensions: [
+            history(),
+            keymap.of([
+              {
+                key: "Mod-s",
+                run: () => {
+                  save();
+                  return true;
+                },
               },
-            },
-            indentWithTab,
-            ...defaultKeymap,
-            ...historyKeymap,
-          ]),
-          lineNumbers(),
-          indentOnInput(),
-          bracketMatching(),
-          syntaxHighlighting(defaultHighlightStyle),
-          EditorView.updateListener.of((update) => {
-            if (update.docChanged) {
-              onDirty();
-            }
-          }),
-          EditorView.theme({
-            "&": {
-              height: "100%",
-              backgroundColor: "var(--bg)",
-              color: "var(--fg)",
-            },
-            ".cm-content": {
-              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-            },
-          }),
-          langConf.of([]),
-        ],
-      }),
+              indentWithTab,
+              ...defaultKeymap,
+              ...historyKeymap,
+            ]),
+            lineNumbers(),
+            indentOnInput(),
+            bracketMatching(),
+            syntaxHighlighting(defaultHighlightStyle),
+            EditorView.updateListener.of((update) => {
+              if (update.docChanged) {
+                dirty();
+              }
+            }),
+            EditorView.theme({
+              "&": {
+                height: "100%",
+                backgroundColor: "var(--bg)",
+                color: "var(--fg)",
+              },
+              ".cm-content": {
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+              },
+            }),
+            langConf.of([]),
+          ],
+        }),
+      });
+      bindApi({
+        getText: () => view.state.doc.toString(),
+      });
+      void languageExtensions(currentPath).then((lang) => {
+        if (cancelled) {
+          return;
+        }
+        view.dispatch({ effects: langConf.reconfigure(lang) });
+      });
+      return () => {
+        cancelled = true;
+        bindApi(null);
+        view.destroy();
+      };
     });
-    register({
-      getText: () => view.state.doc.toString(),
-    });
-    void languageExtensions(currentPath).then((lang) => {
-      if (cancelled) {
-        return;
-      }
-      view.dispatch({ effects: langConf.reconfigure(lang) });
-    });
-    return () => {
-      cancelled = true;
-      register(null);
-      view.destroy();
-    };
   });
 </script>
 
