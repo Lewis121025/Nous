@@ -12,7 +12,6 @@
   import { createHtmlNodeViews } from "./engine/html-view";
   import { createImageNodeViews } from "./engine/image-view";
   import { mathInputPlugins, mathNodeViews } from "./engine/math-view";
-  import { warmupMath } from "./engine/mathjax";
   import { parseMarkdown, serializeMarkdown } from "./engine/markdown";
   import { browserMediaIo, resolveMediaUrl } from "./engine/media";
   import { collectOutline, type OutlineItem } from "./engine/outline";
@@ -54,8 +53,6 @@
     const loadAny = (raw: string, kind: "md" | "wiki") =>
       resolveMediaUrl(notePath, raw, kind, browserMediaIo);
     const doc = parseMarkdown(src);
-    // 公式在后台排进缓存；等整套 MathJax 会让打开笔记卡住。
-    void warmupMath(doc, el);
     const created = new EditorView(el, {
       state: EditorState.create({
         doc,

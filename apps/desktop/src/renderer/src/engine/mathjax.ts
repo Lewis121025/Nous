@@ -1,7 +1,7 @@
 /**
  * 公式排版入口：有 math_* 才动态加载 MathJax；结果进 LRU，渲染不得改文档。
+ * 视口外不排版；样式在第一次 convert 时挂到编辑器根。
  */
-import type { Node as PmNode } from "prosemirror-model";
 import type { MathJaxEngine } from "./mathjax-engine";
 
 const CACHE_LIMIT = 256;
@@ -34,18 +34,6 @@ function cacheSet(key: string, value: HTMLElement): void {
   }
 }
 
-function collectMath(doc: PmNode): { tex: string; display: boolean }[] {
-  const out: { tex: string; display: boolean }[] = [];
-  doc.descendants((node) => {
-    if (node.type.name === "math_inline") {
-      out.push({ tex: String(node.attrs["tex"] ?? ""), display: false });
-    } else if (node.type.name === "math_block") {
-      out.push({ tex: String(node.attrs["tex"] ?? ""), display: true });
-    }
-  });
-  return out;
-}
-
 async function loadEngine(): Promise<MathJaxEngine> {
   if (enginePromise === null) {
     enginePromise = import("./mathjax-engine").then((mod) => mod.createMathJaxEngine());
@@ -70,28 +58,6 @@ function errorNode(tex: string, display: boolean, message: string): HTMLElement 
 }
 
 /**
- * 后台把本篇公式排进 LRU。不阻塞编辑器挂载，也不预热整套字形表。
- *
- * 无公式则立即返回，且不会 import MathJax。
- *
- * @param doc 当前文档树。
- * @param styleRoot 编辑器根；CHTML 样式只挂这里一次。
- */
-export async function warmupMath(doc: PmNode, styleRoot: HTMLElement): Promise<void> {
-  const items = collectMath(doc);
-  if (items.length === 0) {
-    return;
-  }
-  const engine = await loadEngine();
-  engine.attachStyles(styleRoot);
-  const unique = new Map<string, { tex: string; display: boolean }>();
-  for (const item of items) {
-    unique.set(cacheKey(item.tex, item.display), item);
-  }
-  await Promise.all([...unique.values()].map((item) => renderTex(item.tex, item.display)));
-}
-
-/**
  * 取出已排好的 CHTML 克隆；未命中返回 null，由调用方走异步排版。
  *
  * @param tex TeX 源。
@@ -109,8 +75,13 @@ export function peekRenderedTex(tex: string, display: boolean): HTMLElement | nu
  *
  * @param tex TeX 源，非法时仍返回可见错误节点。
  * @param display 是否块级。
+ * @param styleRoot 编辑器根；首次排版时把 CHTML 样式挂到这里。
  */
-export async function renderTex(tex: string, display: boolean): Promise<HTMLElement> {
+export async function renderTex(
+  tex: string,
+  display: boolean,
+  styleRoot?: HTMLElement,
+): Promise<HTMLElement> {
   const key = cacheKey(tex, display);
   const hit = cacheGet(key);
   if (hit !== undefined) {
@@ -118,6 +89,9 @@ export async function renderTex(tex: string, display: boolean): Promise<HTMLElem
   }
   try {
     const engine = await loadEngine();
+    if (styleRoot !== undefined) {
+      engine.attachStyles(styleRoot);
+    }
     const node = await engine.convert(tex, display);
     cacheSet(key, node);
     return cloneCached(node);

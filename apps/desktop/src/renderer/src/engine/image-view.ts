@@ -1,10 +1,11 @@
 /**
- * 图片 NodeView：把 src 解析成可加载 URL 再赋给 <img>。
+ * 图片 NodeView：视口内才把 src 解析成可加载 URL。
  * 加载只改 this.dom，不 dispatch；失败时留下 alt。
  */
 import type { Node as PmNode } from "prosemirror-model";
 import type { EditorView, NodeView, NodeViewConstructor } from "prosemirror-view";
 import type { MediaKind } from "./media";
+import { observeViewport } from "./viewport";
 
 type LoadMedia = (src: string, kind: MediaKind) => Promise<string | null>;
 
@@ -14,8 +15,10 @@ class ImageNodeView implements NodeView {
   private alt: string;
   private title: string | null;
   private readonly kind: MediaKind;
+  private visible = false;
   private objectUrl: string | null = null;
   private loadGen = 0;
+  private readonly stopObserve: () => void;
 
   constructor(
     node: PmNode,
@@ -37,7 +40,16 @@ class ImageNodeView implements NodeView {
     this.dom.dataset.imageSrc = this.src;
     this.dom.dataset.imageKind = this.kind;
     this.dom.contentEditable = "false";
-    this.startLoad();
+    this.dom.style.minWidth = "1.5rem";
+    this.dom.style.minHeight = "1.5rem";
+    this.stopObserve = observeViewport(this.dom, (visible) => {
+      this.visible = visible;
+      if (visible) {
+        this.startLoad();
+      } else {
+        this.unload();
+      }
+    });
   }
 
   update(node: PmNode): boolean {
@@ -63,7 +75,9 @@ class ImageNodeView implements NodeView {
     if (nextSrc !== this.src) {
       this.src = nextSrc;
       this.dom.dataset.imageSrc = nextSrc;
-      this.startLoad();
+      if (this.visible) {
+        this.startLoad();
+      }
     }
     return true;
   }
@@ -74,7 +88,16 @@ class ImageNodeView implements NodeView {
 
   destroy(): void {
     this.loadGen += 1;
+    this.stopObserve();
     this.revoke();
+  }
+
+  private unload(): void {
+    this.loadGen += 1;
+    this.revoke();
+    this.dom.removeAttribute("src");
+    this.dom.style.minWidth = "1.5rem";
+    this.dom.style.minHeight = "1.5rem";
   }
 
   private startLoad(): void {
@@ -94,6 +117,8 @@ class ImageNodeView implements NodeView {
       if (url.startsWith("blob:")) {
         this.objectUrl = url;
       }
+      this.dom.style.removeProperty("min-width");
+      this.dom.style.removeProperty("min-height");
       this.dom.src = url;
     });
   }

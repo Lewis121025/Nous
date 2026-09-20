@@ -1,11 +1,12 @@
 /**
- * HTML NodeView：打开时消毒预览；点进去改源码，失焦才写回 attr。
+ * HTML NodeView：视口内才消毒预览；点进去改源码，失焦才写回 attr。
  * 预览只改 this.dom，不 dispatch；渲染不得标 dirty。
  */
 import type { Node as PmNode } from "prosemirror-model";
 import type { EditorView, NodeView, NodeViewConstructor } from "prosemirror-view";
 import { sanitizeHtml } from "./html";
 import { rewriteMediaSrcs } from "./media";
+import { observeViewport } from "./viewport";
 
 /**
  * 预览 / 源码两态。消毒结果只进 DOM；只有用户改了 html 才写回 attr。
@@ -15,9 +16,11 @@ class HtmlNodeView implements NodeView {
   private html: string;
   private readonly display: boolean;
   private editing = false;
+  private visible = false;
   private sourceEl: HTMLTextAreaElement | HTMLInputElement | null = null;
   private renderGen = 0;
   private blobs: string[] = [];
+  private readonly stopObserve: () => void;
 
   constructor(
     node: PmNode,
@@ -32,7 +35,18 @@ class HtmlNodeView implements NodeView {
     this.dom.dataset.htmlSrc = this.html;
     this.dom.dataset.htmlDisplay = this.display ? "true" : "false";
     this.dom.contentEditable = "false";
-    this.showPreview();
+    this.showPlaceholder();
+    this.stopObserve = observeViewport(this.dom, (visible) => {
+      this.visible = visible;
+      if (this.editing) {
+        return;
+      }
+      if (visible) {
+        this.showPreview();
+      } else {
+        this.showPlaceholder();
+      }
+    });
   }
 
   selectNode(): void {
@@ -55,7 +69,11 @@ class HtmlNodeView implements NodeView {
     this.html = next;
     this.dom.dataset.htmlSrc = next;
     if (!this.editing) {
-      this.showPreview();
+      if (this.visible) {
+        this.showPreview();
+      } else {
+        this.showPlaceholder();
+      }
     }
     return true;
   }
@@ -70,6 +88,7 @@ class HtmlNodeView implements NodeView {
 
   destroy(): void {
     this.renderGen += 1;
+    this.stopObserve();
     this.revokeBlobs();
   }
 
@@ -109,7 +128,17 @@ class HtmlNodeView implements NodeView {
       }
       this.html = next;
     }
-    this.showPreview();
+    if (this.visible) {
+      this.showPreview();
+    } else {
+      this.showPlaceholder();
+    }
+  }
+
+  private showPlaceholder(): void {
+    this.renderGen += 1;
+    this.revokeBlobs();
+    this.dom.textContent = this.html;
   }
 
   private showPreview(): void {
@@ -124,7 +153,7 @@ class HtmlNodeView implements NodeView {
       }
       return url;
     }).then(() => {
-      if (gen !== this.renderGen || this.editing) {
+      if (gen !== this.renderGen || this.editing || !this.visible) {
         for (const url of blobs) {
           URL.revokeObjectURL(url);
         }
