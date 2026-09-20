@@ -1,6 +1,6 @@
 //! 监视库目录变更并在防抖后回调。
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -23,10 +23,11 @@ pub struct WatchHandle {
 /// # Errors
 ///
 /// 无法启动操作系统监视器时返回 IO 错误。
-pub fn start_watch<F>(root: PathBuf, debounce: Duration, on_change: F) -> Result<WatchHandle, Error>
+pub fn start_watch<F>(root: impl AsRef<Path>, debounce: Duration, on_change: F) -> Result<WatchHandle, Error>
 where
     F: Fn() + Send + 'static,
 {
+    let root = root.as_ref();
     let mut debouncer = new_debouncer(debounce, None, move |result: DebounceEventResult| {
         if result.is_ok() {
             on_change();
@@ -34,7 +35,7 @@ where
     })
     .map_err(|err| Error::Io(std::io::Error::other(err)))?;
     debouncer
-        .watch(&root, RecursiveMode::Recursive)
+        .watch(root, RecursiveMode::Recursive)
         .map_err(|err| Error::Io(std::io::Error::other(err)))?;
     Ok(WatchHandle {
         _debouncer: debouncer,

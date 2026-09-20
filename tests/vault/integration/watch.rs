@@ -17,7 +17,7 @@ fn external_edit_refreshes_backlinks_after_debounce() {
     let (tx, rx) = mpsc::channel();
     let watched = Arc::clone(&vault);
     let _handle = nous_core::start_watch(
-        root.path().to_path_buf(),
+        root.path(),
         Duration::from_millis(80),
         move || {
             let _ = watched.refresh_index();

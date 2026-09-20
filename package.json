@@ -5,10 +5,11 @@
   "packageManager": "pnpm@12.5.1",
   "scripts": {
     "dev": "pnpm --filter @nous/desktop dev",
-    "build": "pnpm --filter @nous/desktop build",
+    "build": "pnpm --filter @nous/native build:debug && pnpm --filter @nous/desktop build",
+    "build:native": "pnpm --filter @nous/native build:debug",
     "check": "pnpm --filter @nous/desktop check",
     "lint": "pnpm --filter @nous/desktop lint",
-    "test": "vitest run",
+    "test": "pnpm --filter @nous/desktop test",
     "test:watch": "vitest"
   },
   "devDependencies": {

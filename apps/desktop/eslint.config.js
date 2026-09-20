@@ -17,6 +17,10 @@ export default tseslint.config(
         svelteConfig,
       },
     },
+    rules: {
+      // TypeScript / svelte-check 已校验未定义符号；no-undef 不认识 DOM 全局。
+      "no-undef": "off",
+    },
   },
   {
     files: ["src/**/*.ts", "src/**/*.svelte"],

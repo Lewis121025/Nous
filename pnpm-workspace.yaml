@@ -1,5 +1,6 @@
 packages:
   - apps/desktop
+  - crates/nous-napi
 
 allowBuilds:
   electron: true

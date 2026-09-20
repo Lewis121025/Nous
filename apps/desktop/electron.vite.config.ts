@@ -5,6 +5,9 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
+    resolve: {
+      external: ["@nous/native"],
+    },
   },
   preload: {
     plugins: [externalizeDepsPlugin()],

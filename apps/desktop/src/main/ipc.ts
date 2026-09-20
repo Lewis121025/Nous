@@ -1,0 +1,101 @@
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { createRequire } from "node:module";
+import { app, dialog, ipcMain } from "electron";
+import type { BrowserWindow } from "electron";
+import type { LinkKind, LinkRecord } from "../shared/api";
+
+const require = createRequire(import.meta.url);
+
+type NativeAddon = {
+  vaultOpen: (root: string, indexDir: string, onChanged: () => void) => void;
+  vaultClose: () => void;
+  vaultList: () => string[];
+  fileRead: (rel: string) => Buffer;
+  fileWrite: (rel: string, bytes: Buffer) => void;
+  linksResolve: (from: string, raw: string, kind: string) => string | null;
+  indexLinksTo: (path: string) => NativeLink[];
+  indexLinksFrom: (path: string) => NativeLink[];
+  entryRename: (from: string, to: string) => void;
+};
+
+type NativeLink = {
+  fromPath: string;
+  toRaw: string;
+  toPath?: string;
+  kind: string;
+  startByte: number;
+  endByte: number;
+};
+
+const native = require("@nous/native") as NativeAddon;
+
+function indexDirFor(root: string): string {
+  const hash = createHash("sha256").update(root).digest("hex").slice(0, 16);
+  return join(app.getPath("userData"), "vaults", hash);
+}
+
+function mapLink(link: NativeLink): LinkRecord {
+  const kind: LinkKind = link.kind === "wiki" ? "wiki" : "md";
+  return {
+    fromPath: link.fromPath,
+    toRaw: link.toRaw,
+    toPath: link.toPath ?? null,
+    kind,
+    startByte: link.startByte,
+    endByte: link.endByte,
+  };
+}
+
+/**
+ * 注册主进程 IPC。只转发 `nous-core` 经 napi 暴露的命令。
+ *
+ * @param getWindow 用于把监视事件推到当前窗口。
+ */
+export function registerIpc(getWindow: () => BrowserWindow | null): void {
+  ipcMain.handle("vault.open", async () => {
+    const window = getWindow();
+    const result = window
+      ? await dialog.showOpenDialog(window, { properties: ["openDirectory"] })
+      : await dialog.showOpenDialog({ properties: ["openDirectory"] });
+    const root = result.filePaths[0];
+    if (result.canceled || root === undefined) {
+      return null;
+    }
+    native.vaultOpen(root, indexDirFor(root), () => {
+      getWindow()?.webContents.send("vault.changed");
+    });
+    return root;
+  });
+
+  ipcMain.handle("vault.close", () => {
+    native.vaultClose();
+  });
+
+  ipcMain.handle("vault.list", () => native.vaultList());
+
+  ipcMain.handle("file.read", (_event, rel: string) => {
+    const buffer = native.fileRead(rel);
+    return new Uint8Array(buffer);
+  });
+
+  ipcMain.handle("file.write", (_event, rel: string, bytes: Uint8Array) => {
+    native.fileWrite(rel, Buffer.from(bytes));
+  });
+
+  ipcMain.handle("links.resolve", (_event, from: string, raw: string, kind: LinkKind) => {
+    return native.linksResolve(from, raw, kind);
+  });
+
+  ipcMain.handle("index.linksTo", (_event, path: string) => {
+    return native.indexLinksTo(path).map(mapLink);
+  });
+
+  ipcMain.handle("index.linksFrom", (_event, path: string) => {
+    return native.indexLinksFrom(path).map(mapLink);
+  });
+
+  ipcMain.handle("entry.rename", (_event, from: string, to: string) => {
+    native.entryRename(from, to);
+  });
+}

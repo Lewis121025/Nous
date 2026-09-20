@@ -63,6 +63,12 @@ impl Vault {
         self.rebuild_index()
     }
 
+    fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, Error> {
+        self.conn
+            .lock()
+            .map_err(|_| Error::Io(io::Error::other("索引锁已毒化")))
+    }
+
     /// 库根。
     #[must_use]
     pub fn root(&self) -> &Path {
@@ -141,7 +147,8 @@ impl Vault {
     ///
     /// 索引查询失败。
     pub fn links_to(&self, path: &str) -> Result<Vec<LinkRecord>, Error> {
-        index::links_to(&self.conn.lock().expect("索引锁"), path)
+        let conn = self.lock_conn()?;
+        index::links_to(&conn, path)
     }
 
     /// `path` 的出链。
@@ -150,7 +157,8 @@ impl Vault {
     ///
     /// 索引查询失败。
     pub fn links_from(&self, path: &str) -> Result<Vec<LinkRecord>, Error> {
-        index::links_from(&self.conn.lock().expect("索引锁"), path)
+        let conn = self.lock_conn()?;
+        index::links_from(&conn, path)
     }
 
     /// 把 `from` 文件中的链接原文解析为库内路径。
@@ -290,7 +298,8 @@ impl Vault {
         for link in &mut links {
             link.to_path = resolve_against(&files, &link.from_path, &link.to_raw, link.kind);
         }
-        index::replace_all(&self.conn.lock().expect("索引锁"), &file_rows, &links)?;
+        let conn = self.lock_conn()?;
+        index::replace_all(&conn, &file_rows, &links)?;
         Ok(())
     }
 }
