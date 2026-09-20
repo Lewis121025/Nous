@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
-fn copy_fixture_dir(name: &str) -> (TempDir, TempDir, Vault) {
+fn copy_fixture_dir() -> (TempDir, TempDir, Vault) {
     let root = TempDir::new().expect("库");
     let index = TempDir::new().expect("索引");
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/links/fixtures");
@@ -13,7 +13,6 @@ fn copy_fixture_dir(name: &str) -> (TempDir, TempDir, Vault) {
             fs::copy(entry.path(), root.path().join(entry.file_name())).expect("复制夹具");
         }
     }
-    let _ = name;
     let vault = Vault::open(root.path(), index.path()).expect("打开");
     (root, index, vault)
 }
@@ -27,7 +26,7 @@ fn source_slice(root: &Path, rel: &str, start: i64, end: i64) -> String {
 
 #[test]
 fn fenced_and_inline_code_wiki_are_not_indexed() {
-    let (_root, _index, vault) = copy_fixture_dir("code");
+    let (_root, _index, vault) = copy_fixture_dir();
     let from = vault.links_from("code_and_wiki.md").expect("出链");
     let raws: Vec<&str> = from.iter().map(|l| l.to_raw.as_str()).collect();
     assert!(!raws.iter().any(|r| r.contains("FakeFence")));
@@ -37,7 +36,7 @@ fn fenced_and_inline_code_wiki_are_not_indexed() {
 
 #[test]
 fn wiki_and_markdown_links_record_byte_ranges() {
-    let (root, _index, vault) = copy_fixture_dir("ranges");
+    let (root, _index, vault) = copy_fixture_dir();
     let from = vault.links_from("source.md").expect("出链");
     assert_eq!(from.len(), 2);
 
@@ -66,7 +65,7 @@ fn wiki_and_markdown_links_record_byte_ranges() {
 
 #[test]
 fn links_to_other_includes_source() {
-    let (_root, _index, vault) = copy_fixture_dir("backlinks");
+    let (_root, _index, vault) = copy_fixture_dir();
     let incoming = vault.links_to("Other.md").expect("入链");
     let sources: Vec<&str> = incoming.iter().map(|l| l.from_path.as_str()).collect();
     assert!(sources.contains(&"source.md"));

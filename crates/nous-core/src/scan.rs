@@ -1,7 +1,7 @@
 //! 从 Markdown 源抽出 wiki 与内部 Markdown 链接。
 
 use markdown::mdast::Node;
-use markdown::{ParseOptions, to_mdast};
+use markdown::{to_mdast, ParseOptions};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -34,7 +34,11 @@ pub fn first_heading(source: &str) -> Option<String> {
 
 fn find_heading(node: &Node) -> Option<String> {
     if let Node::Heading(heading) = node {
-        let text = heading.children.iter().map(Node::to_string).collect::<String>();
+        let text = heading
+            .children
+            .iter()
+            .map(Node::to_string)
+            .collect::<String>();
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return None;

@@ -1,6 +1,6 @@
-//! SQLite 链接图。
+//! `SQLite` 链接图。
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::error::Error;
 use crate::link::{LinkKind, LinkRecord};
@@ -9,7 +9,7 @@ use crate::link::{LinkKind, LinkRecord};
 ///
 /// # Errors
 ///
-/// SQLite 失败时返回 IO 包装错误。
+/// `SQLite` 失败时返回 IO 包装错误。
 pub fn open_connection(path: &std::path::Path) -> Result<Connection, Error> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -43,7 +43,7 @@ pub fn open_connection(path: &std::path::Path) -> Result<Connection, Error> {
 ///
 /// # Errors
 ///
-/// SQLite 失败时返回错误。
+/// `SQLite` 失败时返回错误。
 pub fn replace_all(
     conn: &Connection,
     files: &[(String, String, String, i64, String)],
@@ -83,7 +83,7 @@ pub fn replace_all(
 ///
 /// # Errors
 ///
-/// SQLite 失败时返回错误。
+/// `SQLite` 失败时返回错误。
 pub fn links_to(conn: &Connection, path: &str) -> Result<Vec<LinkRecord>, Error> {
     query_links(
         conn,
@@ -96,7 +96,7 @@ pub fn links_to(conn: &Connection, path: &str) -> Result<Vec<LinkRecord>, Error>
 ///
 /// # Errors
 ///
-/// SQLite 失败时返回错误。
+/// `SQLite` 失败时返回错误。
 pub fn links_from(conn: &Connection, path: &str) -> Result<Vec<LinkRecord>, Error> {
     query_links(
         conn,
@@ -134,4 +134,3 @@ fn query_links(conn: &Connection, sql: &str, path: &str) -> Result<Vec<LinkRecor
     }
     Ok(out)
 }
-

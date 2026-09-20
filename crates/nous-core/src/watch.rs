@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use notify::RecursiveMode;
-use notify_debouncer_full::{DebounceEventResult, new_debouncer};
+use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 
 use crate::error::Error;
 
@@ -23,7 +23,11 @@ pub struct WatchHandle {
 /// # Errors
 ///
 /// 无法启动操作系统监视器时返回 IO 错误。
-pub fn start_watch<F>(root: impl AsRef<Path>, debounce: Duration, on_change: F) -> Result<WatchHandle, Error>
+pub fn start_watch<F>(
+    root: impl AsRef<Path>,
+    debounce: Duration,
+    on_change: F,
+) -> Result<WatchHandle, Error>
 where
     F: Fn() + Send + 'static,
 {

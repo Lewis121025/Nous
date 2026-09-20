@@ -10,7 +10,7 @@ pub enum LinkKind {
 }
 
 impl LinkKind {
-    /// SQLite 存储用的稳定字符串。
+    /// `SQLite` 存储用的稳定字符串。
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {

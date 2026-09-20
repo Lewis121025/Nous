@@ -16,7 +16,8 @@ function createWindow(): void {
     backgroundColor: "#ffffff",
     autoHideMenuBar: true,
     webPreferences: {
-      preload: join(__dirname, "../preload/index.mjs"),
+      // 沙箱 preload 必须是 CJS；electron-vite 在 format: "cjs" 时产出 index.cjs。
+      preload: join(__dirname, "../preload/index.cjs"),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,

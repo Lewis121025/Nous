@@ -11,6 +11,14 @@ export default defineConfig({
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
+    build: {
+      rollupOptions: {
+        output: {
+          // 沙箱 preload 只能当普通脚本执行，ESM `import` 会直接语法错误。
+          format: "cjs",
+        },
+      },
+    },
   },
   renderer: {
     resolve: {

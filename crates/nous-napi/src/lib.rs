@@ -75,7 +75,9 @@ pub fn vault_close() -> Result<()> {
 #[napi]
 pub fn vault_list() -> Result<Vec<String>> {
     let state = lock_state()?;
-    let state = state.as_ref().ok_or_else(|| Error::from_reason("尚未打开库"))?;
+    let state = state
+        .as_ref()
+        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
     vault_ref(state).list_files().map_err(to_napi)
 }
 
@@ -87,7 +89,9 @@ pub fn vault_list() -> Result<Vec<String>> {
 #[napi]
 pub fn file_read(rel: String) -> Result<Buffer> {
     let state = lock_state()?;
-    let state = state.as_ref().ok_or_else(|| Error::from_reason("尚未打开库"))?;
+    let state = state
+        .as_ref()
+        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
     let bytes = vault_ref(state).read(&rel).map_err(to_napi)?;
     Ok(Buffer::from(bytes))
 }
@@ -100,8 +104,12 @@ pub fn file_read(rel: String) -> Result<Buffer> {
 #[napi]
 pub fn file_write(rel: String, bytes: Buffer) -> Result<()> {
     let state = lock_state()?;
-    let state = state.as_ref().ok_or_else(|| Error::from_reason("尚未打开库"))?;
-    vault_ref(state).write(&rel, bytes.as_ref()).map_err(to_napi)
+    let state = state
+        .as_ref()
+        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
+    vault_ref(state)
+        .write(&rel, bytes.as_ref())
+        .map_err(to_napi)
 }
 
 /// 解析链接目标。
@@ -117,7 +125,9 @@ pub fn links_resolve(from: String, raw: String, kind: String) -> Result<Option<S
         .parse()
         .map_err(|()| Error::from_reason("未知链接种类"))?;
     let state = lock_state()?;
-    let state = state.as_ref().ok_or_else(|| Error::from_reason("尚未打开库"))?;
+    let state = state
+        .as_ref()
+        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
     Ok(vault_ref(state).resolve_link(&from, &raw, kind))
 }
 
@@ -157,7 +167,9 @@ fn to_js(link: nous_core::LinkRecord) -> JsLinkRecord {
 #[napi]
 pub fn index_links_to(path: String) -> Result<Vec<JsLinkRecord>> {
     let state = lock_state()?;
-    let state = state.as_ref().ok_or_else(|| Error::from_reason("尚未打开库"))?;
+    let state = state
+        .as_ref()
+        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
     Ok(vault_ref(state)
         .links_to(&path)
         .map_err(to_napi)?
@@ -174,7 +186,9 @@ pub fn index_links_to(path: String) -> Result<Vec<JsLinkRecord>> {
 #[napi]
 pub fn index_links_from(path: String) -> Result<Vec<JsLinkRecord>> {
     let state = lock_state()?;
-    let state = state.as_ref().ok_or_else(|| Error::from_reason("尚未打开库"))?;
+    let state = state
+        .as_ref()
+        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
     Ok(vault_ref(state)
         .links_from(&path)
         .map_err(to_napi)?
@@ -191,6 +205,8 @@ pub fn index_links_from(path: String) -> Result<Vec<JsLinkRecord>> {
 #[napi]
 pub fn entry_rename(from: String, to: String) -> Result<()> {
     let state = lock_state()?;
-    let state = state.as_ref().ok_or_else(|| Error::from_reason("尚未打开库"))?;
+    let state = state
+        .as_ref()
+        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
     vault_ref(state).rename(&from, &to).map_err(to_napi)
 }

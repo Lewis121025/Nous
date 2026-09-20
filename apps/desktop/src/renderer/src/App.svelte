@@ -89,19 +89,23 @@
   }
 
   async function openVault(): Promise<void> {
-    const root = await window.nous.vaultOpen();
-    if (root === null) {
-      return;
+    try {
+      const root = await window.nous.vaultOpen();
+      if (root === null) {
+        return;
+      }
+      vaultRoot = root;
+      current = null;
+      originalBytes = null;
+      source = "";
+      dirty = false;
+      backlinks = [];
+      deadOutbound = [];
+      message = "";
+      await refreshList();
+    } catch (err) {
+      message = err instanceof Error ? err.message : "打开库失败";
     }
-    vaultRoot = root;
-    current = null;
-    originalBytes = null;
-    source = "";
-    dirty = false;
-    backlinks = [];
-    deadOutbound = [];
-    message = "";
-    await refreshList();
   }
 
   async function openFile(path: string): Promise<void> {

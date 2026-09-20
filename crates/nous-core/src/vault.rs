@@ -165,7 +165,12 @@ impl Vault {
     ///
     /// wiki 仅在文件名唯一时命中；Markdown 相对路径按源文件目录拼接。
     #[must_use]
-    pub fn resolve_link(&self, from: &str, raw: &str, kind: crate::link::LinkKind) -> Option<String> {
+    pub fn resolve_link(
+        &self,
+        from: &str,
+        raw: &str,
+        kind: crate::link::LinkKind,
+    ) -> Option<String> {
         let Ok(files) = self.list_files() else {
             return None;
         };
@@ -196,7 +201,10 @@ impl Vault {
         let mut by_file: std::collections::HashMap<String, Vec<LinkRecord>> =
             std::collections::HashMap::new();
         for link in incoming {
-            by_file.entry(link.from_path.clone()).or_default().push(link);
+            by_file
+                .entry(link.from_path.clone())
+                .or_default()
+                .push(link);
         }
 
         let mut snapshots: std::collections::HashMap<String, Vec<u8>> =
@@ -222,7 +230,10 @@ impl Vault {
                     )));
                 }
                 let original = std::str::from_utf8(&bytes[start..end]).map_err(|_| {
-                    Error::Io(io::Error::new(io::ErrorKind::InvalidData, "链接区间不是 UTF-8"))
+                    Error::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "链接区间不是 UTF-8",
+                    ))
                 })?;
                 let new_target = match link.kind {
                     crate::link::LinkKind::Wiki => crate::rewrite::wiki_target_name(to),

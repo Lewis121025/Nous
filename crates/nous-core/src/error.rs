@@ -14,7 +14,7 @@ pub enum Error {
     NotFound { path: PathBuf },
     /// 底层 IO。
     Io(io::Error),
-    /// SQLite 索引失败。
+    /// `SQLite` 索引失败。
     Index(rusqlite::Error),
     /// 改名目标已存在。
     AlreadyExists { path: PathBuf },

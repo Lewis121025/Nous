@@ -4,7 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@12.5.1",
   "scripts": {
-    "dev": "pnpm --filter @nous/desktop dev",
+    "dev": "pnpm build:native && pnpm --filter @nous/desktop dev",
     "build": "pnpm --filter @nous/native build:debug && pnpm --filter @nous/desktop build",
     "build:native": "pnpm --filter @nous/native build:debug",
     "check": "pnpm --filter @nous/desktop check",

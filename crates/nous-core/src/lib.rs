@@ -15,4 +15,4 @@ mod watch;
 pub use error::Error;
 pub use link::{LinkKind, LinkRecord};
 pub use vault::Vault;
-pub use watch::{WatchHandle, start_watch};
+pub use watch::{start_watch, WatchHandle};

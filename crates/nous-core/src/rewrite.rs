@@ -41,7 +41,9 @@ fn rewrite_markdown(original: &str, new_url: &str) -> String {
 /// 同目录使用 `./文件名`，以便与常见写法一致。
 #[must_use]
 pub fn relative_markdown_url(from_file: &str, to_file: &str) -> String {
-    let from_dir = Path::new(from_file).parent().unwrap_or_else(|| Path::new(""));
+    let from_dir = Path::new(from_file)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
     let to = Path::new(to_file);
     let from_parts = normal_parts(from_dir);
     let to_parts = normal_parts(to);

@@ -38,11 +38,8 @@ fn rename_updates_wiki_and_markdown_links() {
 
 #[test]
 fn rename_refuses_existing_destination_and_leaves_bytes() {
-    let (root, _index, vault) = vault_with(&[
-        ("A.md", "[[B]]\n"),
-        ("B.md", "b\n"),
-        ("C.md", "c\n"),
-    ]);
+    let (root, _index, vault) =
+        vault_with(&[("A.md", "[[B]]\n"), ("B.md", "b\n"), ("C.md", "c\n")]);
     let a_before = fs::read(root.path().join("A.md")).expect("A");
     let b_before = fs::read(root.path().join("B.md")).expect("B");
 

@@ -12,7 +12,11 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@engine": ["./apps/desktop/src/renderer/src/engine"],
+      "@engine/*": ["./apps/desktop/src/renderer/src/engine/*"]
+    }
   },
   "include": ["tests/**/*.ts", "vitest.config.ts"]
 }
