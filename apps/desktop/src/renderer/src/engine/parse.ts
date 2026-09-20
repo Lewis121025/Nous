@@ -3,6 +3,7 @@
  *
  * 使用 remark/micromark 解析，再映射到文档 schema；wiki 在文本节点上二次识别，
  * 并还原 remark 把 `[[target]]` 拆成 linkReference 的情况。
+ * `$`/`$$` 由 remark-math 识别；math 节点必须显式映射，否则会落入 default 被丢掉。
  */
 import type {
   Heading,
@@ -15,6 +16,7 @@ import type {
 } from "mdast";
 import type { Node as PmNode } from "prosemirror-model";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 import { documentSchema } from "./schema";
@@ -28,7 +30,7 @@ const wikiPattern = /\[\[([^[\]]+)\]\]/g;
  * @returns schema 约束下的文档节点。
  */
 export function parseMarkdown(source: string): PmNode {
-  const tree = unified().use(remarkParse).use(remarkGfm).parse(source);
+  const tree = unified().use(remarkParse).use(remarkGfm).use(remarkMath).parse(source);
   const blocks = tree.children.flatMap((child) => mapBlock(child));
   const content = blocks.length === 0 ? documentSchema.node("paragraph", null, []) : blocks;
   return documentSchema.node("doc", null, content);
@@ -61,6 +63,10 @@ function mapBlock(node: RootContent | ListItem["children"][number]): PmNode[] {
     case "thematicBreak":
       return [documentSchema.node("horizontal_rule")];
     default:
+      // remark-math 的块级节点不在 mdast 默认联合里，只能在这里接住。
+      if (node.type === "math" && hasStringValue(node)) {
+        return [documentSchema.node("math_block", { tex: node.value.trim() })];
+      }
       return [];
   }
 }
@@ -172,6 +178,10 @@ function mapPhrase(node: PhrasingContent, markTypes: string[]): PmNode[] {
     case "linkReference":
       return node.children.flatMap((child) => mapPhrase(child, markTypes));
     default:
+      // 行内 math 同样不在默认 PhrasingContent 联合里。
+      if (node.type === "inlineMath" && hasStringValue(node)) {
+        return [documentSchema.node("math_inline", { tex: node.value.trim() })];
+      }
       return phrasingFallback(node, markTypes);
   }
 }
@@ -192,7 +202,7 @@ function hasPhrasingChildren(
   return "children" in node && Array.isArray(node.children);
 }
 
-function hasStringValue(node: PhrasingContent): node is PhrasingContent & { value: string } {
+function hasStringValue(node: object): node is { value: string } {
   return "value" in node && typeof node.value === "string";
 }
 

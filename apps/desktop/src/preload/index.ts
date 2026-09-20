@@ -1,8 +1,10 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { LinkKind, LinkRecord, NousApi } from "../shared/api";
+import type { LinkKind, LinkRecord, NousApi, VaultRestore } from "../shared/api";
 
 const api: NousApi = {
   vaultOpen: () => ipcRenderer.invoke("vault.open") as Promise<string | null>,
+  vaultRestore: () => ipcRenderer.invoke("vault.restore") as Promise<VaultRestore | null>,
+  sessionSetCurrent: (path) => ipcRenderer.invoke("session.setCurrent", path) as Promise<void>,
   vaultClose: () => ipcRenderer.invoke("vault.close") as Promise<void>,
   vaultList: () => ipcRenderer.invoke("vault.list") as Promise<string[]>,
   fileRead: (rel: string) => ipcRenderer.invoke("file.read", rel) as Promise<Uint8Array>,

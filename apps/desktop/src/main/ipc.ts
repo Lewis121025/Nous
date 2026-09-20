@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { app, dialog, ipcMain } from "electron";
 import type { BrowserWindow } from "electron";
-import type { LinkKind, LinkRecord } from "../shared/api";
+import type { LinkKind, LinkRecord, VaultRestore } from "../shared/api";
+import { loadSession, patchSession, sessionFile } from "./session";
 
 const require = createRequire(import.meta.url);
 
@@ -35,6 +37,18 @@ function indexDirFor(root: string): string {
   return join(app.getPath("userData"), "vaults", hash);
 }
 
+function sessionPath(): string {
+  return sessionFile(app.getPath("userData"));
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return existsSync(path) && statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function mapLink(link: NativeLink): LinkRecord {
   const kind: LinkKind = link.kind === "wiki" ? "wiki" : "md";
   return {
@@ -45,6 +59,12 @@ function mapLink(link: NativeLink): LinkRecord {
     startByte: link.startByte,
     endByte: link.endByte,
   };
+}
+
+function openNativeVault(root: string, getWindow: () => BrowserWindow | null): void {
+  native.vaultOpen(root, indexDirFor(root), () => {
+    getWindow()?.webContents.send("vault.changed");
+  });
 }
 
 /**
@@ -62,10 +82,28 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     if (result.canceled || root === undefined) {
       return null;
     }
-    native.vaultOpen(root, indexDirFor(root), () => {
-      getWindow()?.webContents.send("vault.changed");
-    });
+    openNativeVault(root, getWindow);
+    patchSession(sessionPath(), { vaultRoot: root, currentPath: null });
     return root;
+  });
+
+  ipcMain.handle("vault.restore", (): VaultRestore | null => {
+    const session = loadSession(sessionPath());
+    const root = session.vaultRoot;
+    if (root === null || !isDirectory(root)) {
+      return null;
+    }
+    try {
+      openNativeVault(root, getWindow);
+    } catch {
+      return null;
+    }
+    return { root, currentPath: session.currentPath };
+  });
+
+  ipcMain.handle("session.setCurrent", (_event, path: unknown) => {
+    const currentPath = typeof path === "string" && path !== "" ? path : null;
+    patchSession(sessionPath(), { currentPath });
   });
 
   ipcMain.handle("vault.close", () => {

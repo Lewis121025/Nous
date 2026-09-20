@@ -9,6 +9,8 @@
   import { EditorView } from "prosemirror-view";
   import "prosemirror-view/style/prosemirror.css";
   import type { MarkdownEditorApi } from "./engine/editor-api";
+  import { mathInputPlugins, mathNodeViews } from "./engine/math-view";
+  import { warmupMath } from "./engine/mathjax";
   import { parseMarkdown, serializeMarkdown } from "./engine/markdown";
 
   type Props = {
@@ -34,68 +36,85 @@
 
   $effect(() => {
     const el = host;
+    const src = source;
     if (el === undefined) {
       return;
     }
-    const doc = parseMarkdown(source);
-    let view: EditorView;
-    view = new EditorView(el, {
-      state: EditorState.create({
-        doc,
-        plugins: [
-          history(),
-          keymap({
-            "Mod-s": () => {
-              onSave();
-              return true;
-            },
-            "Mod-z": undo,
-            "Mod-y": redo,
-            "Mod-Shift-z": redo,
-          }),
-          keymap(baseKeymap),
-        ],
-      }),
-      handleClickOn(_view, _pos, node) {
-        if (node.type.name !== "wiki_link") {
-          return false;
-        }
-        const target = String(node.attrs["target"] ?? "");
-        if (target !== "") {
-          onOpenLink("wiki", target);
-        }
-        return true;
-      },
-      handleClick(_view, _pos, event) {
-        const target = event.target;
-        if (!(target instanceof Element)) {
-          return false;
-        }
-        const anchor = target.closest("a[href]");
-        if (!(anchor instanceof HTMLAnchorElement)) {
-          return false;
-        }
-        event.preventDefault();
-        const href = anchor.getAttribute("href") ?? "";
-        if (href === "" || isExternalHref(href)) {
+    let cancelled = false;
+    let view: EditorView | undefined;
+    void (async () => {
+      const doc = parseMarkdown(src);
+      await warmupMath(doc, el);
+      if (cancelled) {
+        return;
+      }
+      const created = new EditorView(el, {
+        state: EditorState.create({
+          doc,
+          plugins: [
+            history(),
+            ...mathInputPlugins(),
+            keymap({
+              "Mod-s": () => {
+                onSave();
+                return true;
+              },
+              "Mod-z": undo,
+              "Mod-y": redo,
+              "Mod-Shift-z": redo,
+            }),
+            keymap(baseKeymap),
+          ],
+        }),
+        nodeViews: mathNodeViews,
+        handleClickOn(_view, _pos, node) {
+          if (node.type.name !== "wiki_link") {
+            return false;
+          }
+          const target = String(node.attrs["target"] ?? "");
+          if (target !== "") {
+            onOpenLink("wiki", target);
+          }
           return true;
-        }
-        onOpenLink("md", href);
-        return true;
-      },
-      dispatchTransaction(tr) {
-        view.updateState(view.state.apply(tr));
-        if (tr.docChanged) {
-          onDirty();
-        }
-      },
-    });
-    register({
-      serialize: () => serializeMarkdown(view.state.doc),
-    });
+        },
+        handleClick(_view, _pos, event) {
+          const target = event.target;
+          if (!(target instanceof Element)) {
+            return false;
+          }
+          const anchor = target.closest("a[href]");
+          if (!(anchor instanceof HTMLAnchorElement)) {
+            return false;
+          }
+          event.preventDefault();
+          const href = anchor.getAttribute("href") ?? "";
+          if (href === "" || isExternalHref(href)) {
+            return true;
+          }
+          onOpenLink("md", href);
+          return true;
+        },
+        dispatchTransaction(tr) {
+          created.updateState(created.state.apply(tr));
+          if (tr.docChanged) {
+            onDirty();
+          }
+        },
+      });
+      if (cancelled) {
+        created.destroy();
+        return;
+      }
+      view = created;
+      register({
+        serialize: () => serializeMarkdown(created.state.doc),
+      });
+    })();
     return () => {
+      cancelled = true;
       register(null);
-      view.destroy();
+      view?.destroy();
+      el.replaceChildren();
     };
   });
 
@@ -125,5 +144,30 @@
   .surface :global(.ProseMirror a) {
     color: inherit;
     cursor: pointer;
+  }
+
+  .surface :global(.math-inline) {
+    display: inline-block;
+    vertical-align: middle;
+    cursor: text;
+  }
+
+  .surface :global(.math-block) {
+    display: block;
+    margin: 0.5rem 0;
+    overflow-x: auto;
+    cursor: text;
+  }
+
+  .surface :global(.math-source) {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.95em;
+  }
+
+  .surface :global(.math-error) {
+    color: #b00020;
   }
 </style>

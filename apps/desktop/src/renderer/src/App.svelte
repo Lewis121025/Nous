@@ -26,6 +26,7 @@
   const decoder = new TextDecoder();
 
   onMount(() => {
+    void restoreSession();
     return window.nous.subscribeVaultChanged(() => {
       void onVaultChanged();
     });
@@ -76,6 +77,7 @@
         source = "";
         backlinks = [];
         deadOutbound = [];
+        void window.nous.sessionSetCurrent(null);
       }
       return;
     }
@@ -86,6 +88,27 @@
     const bytes = await window.nous.fileRead(current);
     originalBytes = bytes;
     source = decoder.decode(bytes);
+  }
+
+  /**
+   * 启动时按主进程会话打开上次的库和文件，不弹选目录框。
+   */
+  async function restoreSession(): Promise<void> {
+    try {
+      const restored = await window.nous.vaultRestore();
+      if (restored === null) {
+        return;
+      }
+      vaultRoot = restored.root;
+      await refreshList();
+      if (restored.currentPath !== null && files.includes(restored.currentPath)) {
+        await openFile(restored.currentPath);
+        return;
+      }
+      await window.nous.sessionSetCurrent(null);
+    } catch (err) {
+      message = err instanceof Error ? err.message : "恢复会话失败";
+    }
   }
 
   async function openVault(): Promise<void> {
@@ -123,6 +146,7 @@
     dirty = false;
     renameName = basename(path);
     message = "";
+    await window.nous.sessionSetCurrent(path);
     await refreshLinks(path);
   }
 
@@ -217,6 +241,7 @@
       originalBytes = bytes;
       source = decoder.decode(bytes);
       dirty = false;
+      await window.nous.sessionSetCurrent(to);
       await refreshList();
       await refreshLinks(to);
       message = "";

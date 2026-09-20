@@ -26,11 +26,26 @@ export type LinkRecord = {
 /**
  * 经 IPC 暴露给渲染进程的命令。
  *
- * 打开库走系统对话框，渲染进程拿不到任意路径读写。
+ * 打开库走系统对话框或主进程会话恢复；渲染进程拿不到任意路径读写。
  */
+export type VaultRestore = {
+  /** 库根绝对路径。 */
+  root: string;
+  /** 上次打开的库内相对路径；没有或已删除为 `null`。 */
+  currentPath: string | null;
+};
+
 export type NousApi = {
   /** 弹出选目录对话框并打开库；取消时返回 `null`。 */
   vaultOpen: () => Promise<string | null>;
+  /**
+   * 用主进程记下的库路径恢复会话，不弹对话框。
+   *
+   * 没有可用会话时返回 `null`。
+   */
+  vaultRestore: () => Promise<VaultRestore | null>;
+  /** 把当前打开的相对路径写入会话；`null` 表示没有打开文件。 */
+  sessionSetCurrent: (path: string | null) => Promise<void>;
   /** 关闭当前库。 */
   vaultClose: () => Promise<void>;
   /** 列出库内相对路径。 */

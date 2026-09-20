@@ -43,6 +43,11 @@ function serializeBlock(node: PmNode, indent: number): string {
     }
     case "horizontal_rule":
       return "---";
+    case "math_block": {
+      const tex = String(node.attrs["tex"] ?? "");
+      // TeX 不能走 escapeText，否则 `\` 会被改写，二次解析对不上。
+      return `$$\n${tex}\n$$`;
+    }
     default:
       return serializeInline(node);
   }
@@ -103,6 +108,10 @@ function serializeInline(node: PmNode): string {
       } else {
         out += `[[${target}]]`;
       }
+      return;
+    }
+    if (child.type.name === "math_inline") {
+      out += `$${String(child.attrs["tex"] ?? "")}$`;
       return;
     }
     if (child.type.name === "hard_break") {
