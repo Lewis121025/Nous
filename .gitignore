@@ -1,0 +1,16 @@
+node_modules/
+dist/
+out/
+target/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
+*.log
+.vite/
+.svelte-kit/
+coverage/
+*.node
+.cache/
+*.tsbuildinfo

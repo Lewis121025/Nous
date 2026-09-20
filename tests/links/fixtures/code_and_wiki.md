@@ -1,0 +1,7 @@
+```
+[[FakeFence]]
+```
+
+`[[FakeInline]]`
+
+Alive [[Other]]

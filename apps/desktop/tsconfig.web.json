@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "lib": ["ES2022", "DOM"],
+    "types": ["svelte"],
+    "noEmit": true
+  },
+  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.svelte", "src/shared/**/*.ts"]
+}

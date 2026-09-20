@@ -1,0 +1,41 @@
+[package]
+name = "nous-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Nous 库内核：磁盘、链接索引与改名事务"
+
+[lints]
+workspace = true
+
+[lib]
+name = "nous_core"
+path = "src/lib.rs"
+
+[[test]]
+name = "vault_unit_identity_write"
+path = "../../tests/vault/unit/identity_write.rs"
+
+[[test]]
+name = "vault_integration_watch"
+path = "../../tests/vault/integration/watch.rs"
+
+[[test]]
+name = "links_unit_scan"
+path = "../../tests/links/unit/scan.rs"
+
+[[test]]
+name = "links_integration_rename"
+path = "../../tests/links/integration/rename.rs"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[dependencies]
+markdown = "1.0.0"
+notify = "8.2.0"
+notify-debouncer-full = "0.7.0"
+regex = "1.13.1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2 = "0.11.0"
