@@ -49,99 +49,89 @@
     if (el === undefined) {
       return;
     }
-    let cancelled = false;
     let view: EditorView | undefined;
     const loadMd = (raw: string) => resolveMediaUrl(notePath, raw, "md", browserMediaIo);
     const loadAny = (raw: string, kind: "md" | "wiki") =>
       resolveMediaUrl(notePath, raw, kind, browserMediaIo);
-    void (async () => {
-      const doc = parseMarkdown(src);
-      await warmupMath(doc, el);
-      if (cancelled) {
-        return;
-      }
-      const created = new EditorView(el, {
-          state: EditorState.create({
-            doc,
-            plugins: [
-              history(),
-              ...mathInputPlugins(),
-              keymap({
-                "Mod-s": () => {
-                  onSave();
-                  return true;
-                },
-                "Mod-z": undo,
-                "Mod-y": redo,
-                "Mod-Shift-z": redo,
-              }),
-              keymap(baseKeymap),
-            ],
-          }),
-          nodeViews: {
-            ...mathNodeViews,
-            ...createHtmlNodeViews(loadMd),
-            ...createImageNodeViews(loadAny),
-          },
-          handleClickOn(_view, _pos, node) {
-            if (node.type.name !== "wiki_link") {
-              return false;
-            }
-            const target = String(node.attrs["target"] ?? "");
-            if (target !== "") {
-              onOpenLink("wiki", target);
-            }
-            return true;
-          },
-          handleClick(_view, _pos, event) {
-            const target = event.target;
-            if (!(target instanceof Element)) {
-              return false;
-            }
-            const anchor = target.closest("a[href]");
-            if (!(anchor instanceof HTMLAnchorElement)) {
-              return false;
-            }
-            event.preventDefault();
-            const href = anchor.getAttribute("href") ?? "";
-            if (href === "" || isExternalHref(href)) {
+    const doc = parseMarkdown(src);
+    // 公式在后台排进缓存；等整套 MathJax 会让打开笔记卡住。
+    void warmupMath(doc, el);
+    const created = new EditorView(el, {
+      state: EditorState.create({
+        doc,
+        plugins: [
+          history(),
+          ...mathInputPlugins(),
+          keymap({
+            "Mod-s": () => {
+              onSave();
               return true;
-            }
-            onOpenLink("md", href);
-            return true;
-          },
-          dispatchTransaction(tr) {
-            const next = created.state.apply(tr);
-            created.updateState(next);
-            if (tr.docChanged) {
-              onDirty();
-              onOutline(collectOutline(next.doc));
-            }
-          },
-        });
-        if (cancelled) {
-          created.destroy();
+            },
+            "Mod-z": undo,
+            "Mod-y": redo,
+            "Mod-Shift-z": redo,
+          }),
+          keymap(baseKeymap),
+        ],
+      }),
+      nodeViews: {
+        ...mathNodeViews,
+        ...createHtmlNodeViews(loadMd),
+        ...createImageNodeViews(loadAny),
+      },
+      handleClickOn(_view, _pos, node) {
+        if (node.type.name !== "wiki_link") {
+          return false;
+        }
+        const target = String(node.attrs["target"] ?? "");
+        if (target !== "") {
+          onOpenLink("wiki", target);
+        }
+        return true;
+      },
+      handleClick(_view, _pos, event) {
+        const target = event.target;
+        if (!(target instanceof Element)) {
+          return false;
+        }
+        const anchor = target.closest("a[href]");
+        if (!(anchor instanceof HTMLAnchorElement)) {
+          return false;
+        }
+        event.preventDefault();
+        const href = anchor.getAttribute("href") ?? "";
+        if (href === "" || isExternalHref(href)) {
+          return true;
+        }
+        onOpenLink("md", href);
+        return true;
+      },
+      dispatchTransaction(tr) {
+        const next = created.state.apply(tr);
+        created.updateState(next);
+        if (tr.docChanged) {
+          onDirty();
+          onOutline(collectOutline(next.doc));
+        }
+      },
+    });
+    view = created;
+    onOutline(collectOutline(created.state.doc));
+    register({
+      serialize: () => serializeMarkdown(created.state.doc),
+      jumpTo: (pos) => {
+        const { doc } = created.state;
+        if (pos < 0 || pos >= doc.content.size) {
           return;
         }
-        view = created;
-        onOutline(collectOutline(created.state.doc));
-        register({
-          serialize: () => serializeMarkdown(created.state.doc),
-          jumpTo: (pos) => {
-            const { doc } = created.state;
-            if (pos < 0 || pos >= doc.content.size) {
-              return;
-            }
-            const resolved = doc.resolve(Math.min(pos + 1, doc.content.size));
-            created.dispatch(
-              created.state.tr.setSelection(TextSelection.near(resolved)).scrollIntoView(),
-            );
-            created.focus();
-          },
-        });
-    })();
+        const resolved = doc.resolve(Math.min(pos + 1, doc.content.size));
+        created.dispatch(
+          created.state.tr.setSelection(TextSelection.near(resolved)).scrollIntoView(),
+        );
+        created.focus();
+      },
+    });
     return () => {
-      cancelled = true;
       onOutline([]);
       register(null);
       view?.destroy();

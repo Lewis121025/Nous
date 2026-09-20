@@ -25,6 +25,8 @@ pub struct Vault {
     conn: Mutex<Connection>,
     /// 索引提交代次：刷新若带着更早快照回来则丢弃，避免盖住已经提交的写入。
     index_epoch: AtomicU64,
+    /// 最近一次扫描的库内路径。列目录和解析链接走这里，避免每次下盘。
+    inventory: Mutex<Option<Inventory>>,
 }
 
 impl Vault {
@@ -52,8 +54,9 @@ impl Vault {
             index_dir,
             conn: Mutex::new(conn),
             index_epoch: AtomicU64::new(0),
+            inventory: Mutex::new(None),
         };
-        vault.refresh_index()?;
+        let _ = vault.refresh_index()?;
         Ok(vault)
     }
 
@@ -62,14 +65,18 @@ impl Vault {
     /// `mtime` 未变的文件不读内容；内容哈希未变则只更新时间戳。
     /// 扫描器版本落后时忽略上述跳过，全量重扫。
     /// 文件集合变了才重算全库链接指向。
+    /// 磁盘集合与每篇 `mtime` 都未变时不写 SQLite，避免打开库和监视空转把整表重抄。
     ///
     /// 文件监视在防抖后调用；外部改盘不会走 `write`，必须显式刷新。
+    ///
+    /// 返回是否改写了索引；监视器据此决定要不要通知界面。
     ///
     /// # Errors
     ///
     /// 读盘或写索引失败。
-    pub fn refresh_index(&self) -> Result<(), Error> {
-        let files = self.list_files()?;
+    pub fn refresh_index(&self) -> Result<bool, Error> {
+        let files = self.scan_files()?;
+        self.store_inventory(files.clone())?;
         let (indexed_files, indexed_links, stale_scan, epoch) = {
             let conn = self.lock_conn()?;
             (
@@ -95,12 +102,26 @@ impl Vault {
         let indexed_set: HashSet<&str> = by_path.keys().map(String::as_str).collect();
         let set_changed = disk_set != indexed_set;
 
-        let mut file_rows = Vec::new();
-        let mut links = Vec::new();
+        let mut mtimes = Vec::with_capacity(files.len());
         for rel in &files {
             let abs = resolve_in_root(&self.root, rel)?;
-            let meta = fs::metadata(&abs)?;
-            let mtime = mtime_stamp(&meta);
+            mtimes.push(mtime_stamp(&fs::metadata(&abs)?));
+        }
+
+        if !stale_scan && !set_changed {
+            let all_match = files
+                .iter()
+                .zip(&mtimes)
+                .all(|(rel, mtime)| by_path.get(rel).is_some_and(|old| old.mtime == *mtime));
+            if all_match {
+                return Ok(false);
+            }
+        }
+
+        let inventory = Inventory::from_files(files.clone());
+        let mut file_rows = Vec::new();
+        let mut links = Vec::new();
+        for (rel, mtime) in files.iter().zip(mtimes) {
             if !stale_scan {
                 if let Some(old) = by_path.get(rel) {
                     if old.mtime == mtime {
@@ -112,6 +133,7 @@ impl Vault {
                     }
                 }
             }
+            let abs = resolve_in_root(&self.root, rel)?;
             let bytes = fs::read(&abs)?;
             let hash = hex_sha256(&bytes);
             if !stale_scan {
@@ -127,29 +149,42 @@ impl Vault {
                     }
                 }
             }
-            file_rows.push(file_row_from_bytes(rel, &bytes, mtime));
-            links.extend(extract_resolved(rel, &bytes, &files));
+            let (row, outgoing) = index_bytes(rel, &bytes, mtime, &inventory);
+            file_rows.push(row);
+            links.extend(outgoing);
         }
 
         if set_changed {
             for link in &mut links {
-                link.to_path = resolve_against(&files, &link.from_path, &link.to_raw, link.kind);
+                link.to_path =
+                    resolve_against(&inventory, &link.from_path, &link.to_raw, link.kind);
             }
         }
 
         let conn = self.lock_conn()?;
         if self.index_epoch.load(Ordering::SeqCst) != epoch {
-            return Ok(());
+            return Ok(false);
         }
         index::replace_all(&conn, &file_rows, &links)?;
         self.index_epoch.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(true)
     }
 
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, Error> {
         self.conn
             .lock()
             .map_err(|_| Error::Io(io::Error::other("索引锁已毒化")))
+    }
+
+    fn lock_inventory(&self) -> Result<std::sync::MutexGuard<'_, Option<Inventory>>, Error> {
+        self.inventory
+            .lock()
+            .map_err(|_| Error::Io(io::Error::other("目录缓存锁已毒化")))
+    }
+
+    fn store_inventory(&self, files: Vec<String>) -> Result<(), Error> {
+        *self.lock_inventory()? = Some(Inventory::from_files(files));
+        Ok(())
     }
 
     /// 库根。
@@ -213,10 +248,24 @@ impl Vault {
 
     /// 列出库内文件的相对路径（跳过以 `.` 开头的目录与文件）。
     ///
+    /// 打开或刷新之后走内存名单，避免每次解析链接、加载图片都递归扫盘。
+    ///
     /// # Errors
     ///
     /// 读目录失败时返回 IO 错误。
     pub fn list_files(&self) -> Result<Vec<String>, Error> {
+        {
+            let guard = self.lock_inventory()?;
+            if let Some(inventory) = guard.as_ref() {
+                return Ok(inventory.files.clone());
+            }
+        }
+        let files = self.scan_files()?;
+        self.store_inventory(files.clone())?;
+        Ok(files)
+    }
+
+    fn scan_files(&self) -> Result<Vec<String>, Error> {
         let mut out = Vec::new();
         collect_files(&self.root, &self.root, &mut out)?;
         out.sort();
@@ -253,10 +302,9 @@ impl Vault {
         raw: &str,
         kind: crate::link::LinkKind,
     ) -> Option<String> {
-        let Ok(files) = self.list_files() else {
-            return None;
-        };
-        resolve_against(&files, from, raw, kind)
+        let guard = self.lock_inventory().ok()?;
+        let inventory = guard.as_ref()?;
+        resolve_against(inventory, from, raw, kind)
     }
 
     /// 将库内文件改名为 `to`（相对路径），并按字节区间更新全库链接。
@@ -356,68 +404,111 @@ impl Vault {
     }
 
     /// 用刚写入的字节更新该文件索引；文件集合变了才重算全库指向。
+    ///
+    /// 必须扫盘：外部删文件不会走 `write`，缓存里还留着旧路径。
     fn reindex_written(&self, rel: &str, bytes: &[u8]) -> Result<(), Error> {
-        let files = self.list_files()?;
-        let disk_set: HashSet<String> = files.iter().cloned().collect();
-        let abs = resolve_in_root(&self.root, rel)?;
-        let mtime = mtime_stamp(&fs::metadata(&abs)?);
-        let row = file_row_from_bytes(rel, bytes, mtime);
-        let new_links = extract_resolved(rel, bytes, &files);
+        let files = self.scan_files()?;
+        self.store_inventory(files.clone())?;
+        let inventory = Inventory::from_files(files);
+        let mtime = mtime_stamp(&fs::metadata(&resolve_in_root(&self.root, rel)?)?);
+        let (row, new_links) = index_bytes(rel, bytes, mtime, &inventory);
 
         let conn = self.lock_conn()?;
-        let mut file_rows = index::load_files(&conn)?;
-        let mut links = index::load_links(&conn)?;
+        let file_rows = index::load_files(&conn)?;
         let indexed_set: HashSet<String> = file_rows.iter().map(|file| file.path.clone()).collect();
-        let set_changed = disk_set != indexed_set;
-        file_rows.retain(|file| disk_set.contains(&file.path));
-        links.retain(|link| disk_set.contains(&link.from_path));
-        file_rows.retain(|file| file.path != rel);
-        file_rows.push(row);
-        links.retain(|link| link.from_path != rel);
-        links.extend(new_links);
+        let set_changed = inventory.set != indexed_set;
         if set_changed {
-            for link in &mut links {
-                link.to_path = resolve_against(&files, &link.from_path, &link.to_raw, link.kind);
+            for old in &indexed_set {
+                if !inventory.set.contains(old) {
+                    index::delete_file(&conn, old)?;
+                }
             }
         }
-        index::replace_all(&conn, &file_rows, &links)?;
+        index::upsert_file(&conn, &row, &new_links)?;
+        if set_changed {
+            let mut links = index::load_links(&conn)?;
+            for link in &mut links {
+                link.to_path =
+                    resolve_against(&inventory, &link.from_path, &link.to_raw, link.kind);
+            }
+            index::replace_links(&conn, &links)?;
+        }
         self.index_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
 
-fn file_row_from_bytes(rel: &str, bytes: &[u8], mtime: i64) -> FileRow {
-    let is_md = is_markdown(rel);
-    let kind = if is_md { "markdown" } else { "other" };
-    let title = if is_md {
-        std::str::from_utf8(bytes)
-            .ok()
-            .and_then(scan::first_heading)
-            .unwrap_or_else(|| file_title_fallback(rel))
-    } else {
-        file_title_fallback(rel)
-    };
-    FileRow {
-        path: rel.to_string(),
-        title,
-        kind: kind.to_string(),
-        mtime,
-        content_hash: hex_sha256(bytes),
+/// 库内路径名单与 wiki 名到路径的映射。
+#[derive(Clone)]
+struct Inventory {
+    files: Vec<String>,
+    set: HashSet<String>,
+    wiki: HashMap<String, Vec<String>>,
+}
+
+impl Inventory {
+    fn from_files(files: Vec<String>) -> Self {
+        let wiki = wiki_map(&files);
+        let set = files.iter().cloned().collect();
+        Self { files, set, wiki }
     }
 }
 
-fn extract_resolved(rel: &str, bytes: &[u8], files: &[String]) -> Vec<LinkRecord> {
+fn wiki_map(files: &[String]) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for file in files {
+        let path = Path::new(file);
+        let name = path
+            .file_name()
+            .map(|part| part.to_string_lossy().into_owned());
+        let stem = path
+            .file_stem()
+            .map(|part| part.to_string_lossy().into_owned());
+        if let Some(name) = name {
+            map.entry(name.clone()).or_default().push(file.clone());
+            if let Some(stem) = stem {
+                if stem != name {
+                    map.entry(stem).or_default().push(file.clone());
+                }
+            }
+        }
+    }
+    map
+}
+
+fn index_bytes(
+    rel: &str,
+    bytes: &[u8],
+    mtime: i64,
+    inventory: &Inventory,
+) -> (FileRow, Vec<LinkRecord>) {
     if !is_markdown(rel) {
-        return Vec::new();
+        return (
+            FileRow {
+                path: rel.to_string(),
+                title: file_title_fallback(rel),
+                kind: "other".to_string(),
+                mtime,
+                content_hash: hex_sha256(bytes),
+            },
+            Vec::new(),
+        );
     }
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return Vec::new();
-    };
-    let mut links = scan::extract_links(rel, text);
+    let (heading, mut links) = std::str::from_utf8(bytes).map_or_else(
+        |_| (None, Vec::new()),
+        |text| scan::scan_markdown(rel, text),
+    );
     for link in &mut links {
-        link.to_path = resolve_against(files, &link.from_path, &link.to_raw, link.kind);
+        link.to_path = resolve_against(inventory, &link.from_path, &link.to_raw, link.kind);
     }
-    links
+    let row = FileRow {
+        path: rel.to_string(),
+        title: heading.unwrap_or_else(|| file_title_fallback(rel)),
+        kind: "markdown".to_string(),
+        mtime,
+        content_hash: hex_sha256(bytes),
+    };
+    (row, links)
 }
 
 fn mtime_stamp(meta: &fs::Metadata) -> i64 {
@@ -474,35 +565,28 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), E
 }
 
 fn resolve_against(
-    files: &[String],
+    inventory: &Inventory,
     from: &str,
     raw: &str,
     kind: crate::link::LinkKind,
 ) -> Option<String> {
     let (path, _) = crate::link::split_resource(raw.trim());
     match kind {
-        crate::link::LinkKind::Wiki => resolve_wiki(files, path),
-        crate::link::LinkKind::Markdown => resolve_markdown(files, from, path),
+        crate::link::LinkKind::Wiki => resolve_wiki(inventory, path),
+        crate::link::LinkKind::Markdown => resolve_markdown(inventory, from, path),
     }
 }
 
-fn resolve_wiki(files: &[String], raw: &str) -> Option<String> {
-    let mut hits = Vec::new();
-    for file in files {
-        let name = Path::new(file).file_name()?.to_string_lossy();
-        let stem = Path::new(file).file_stem()?.to_string_lossy();
-        if name == raw || stem == raw {
-            hits.push(file.clone());
-        }
-    }
+fn resolve_wiki(inventory: &Inventory, raw: &str) -> Option<String> {
+    let hits = inventory.wiki.get(raw)?;
     if hits.len() == 1 {
-        hits.pop()
+        hits.first().cloned()
     } else {
         None
     }
 }
 
-fn resolve_markdown(files: &[String], from: &str, raw: &str) -> Option<String> {
+fn resolve_markdown(inventory: &Inventory, from: &str, raw: &str) -> Option<String> {
     let base = Path::new(from).parent().unwrap_or_else(|| Path::new(""));
     let joined = base.join(raw);
     let mut out = PathBuf::new();
@@ -519,5 +603,5 @@ fn resolve_markdown(files: &[String], from: &str, raw: &str) -> Option<String> {
         }
     }
     let rel = out.to_string_lossy().replace('\\', "/");
-    files.iter().find(|f| *f == &rel).cloned()
+    inventory.set.contains(&rel).then_some(rel)
 }

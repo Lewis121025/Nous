@@ -26,8 +26,6 @@ for (const [path, loader] of Object.entries(dynamicGlyphs)) {
 export type MathJaxEngine = {
   /** 把 TeX 排成 CHTML 节点；非法 TeX 走 merror，不抛。 */
   convert: (tex: string, display: boolean) => Promise<HTMLElement>;
-  /** 预热全部动态字形表，避免之后某条公式再去 import。 */
-  loadDynamicFiles: () => Promise<void>;
   /** 把自适应 CHTML 样式挂到编辑器根一次。 */
   attachStyles: (root: HTMLElement) => void;
 };
@@ -88,10 +86,6 @@ export function createMathJaxEngine(): MathJaxEngine {
         document.head.append(sheet);
       }
       return asHtml(node, "convert");
-    },
-    async loadDynamicFiles(): Promise<void> {
-      await chtml.font.loadDynamicFiles();
-      chtml.styleSheet(html);
     },
     attachStyles(root: HTMLElement): void {
       const sheet = asHtml(chtml.styleSheet(html), "stylesheet");

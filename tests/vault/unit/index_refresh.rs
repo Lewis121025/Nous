@@ -115,3 +115,37 @@ fn refresh_rescans_when_scan_version_is_stale() {
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].start_byte, good_start);
 }
+
+fn sqlite_data_version(conn: &rusqlite::Connection) -> i32 {
+    conn.query_row("PRAGMA data_version", [], |row| row.get(0))
+        .expect("data_version")
+}
+
+fn file_rowid(conn: &rusqlite::Connection, path: &str) -> i64 {
+    conn.query_row("SELECT rowid FROM files WHERE path = ?1", [path], |row| {
+        row.get(0)
+    })
+    .expect("rowid")
+}
+
+fn open_index(index: &TempDir) -> rusqlite::Connection {
+    rusqlite::Connection::open(index.path().join("index.sqlite")).expect("探测索引")
+}
+
+#[test]
+fn refresh_without_disk_change_does_not_rewrite_sqlite() {
+    let (_root, index, vault) = open_temp_vault(&[("A.md", "hello\n"), ("B.md", "[[A]]\n")]);
+    let probe = open_index(&index);
+    let before = sqlite_data_version(&probe);
+    vault.refresh_index().expect("无变更刷新");
+    assert_eq!(sqlite_data_version(&probe), before, "磁盘没变就不该改索引");
+}
+
+#[test]
+fn write_existing_file_does_not_rebuild_sibling_row() {
+    let (_root, index, vault) = open_temp_vault(&[("A.md", "hello\n"), ("B.md", "keep\n")]);
+    let probe = open_index(&index);
+    let sibling = file_rowid(&probe, "B.md");
+    vault.write("A.md", b"hello again\n").expect("写 A");
+    assert_eq!(file_rowid(&probe, "B.md"), sibling);
+}

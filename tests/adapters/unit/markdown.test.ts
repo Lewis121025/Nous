@@ -27,6 +27,15 @@ A **bold** and *em* and \`code\`.
     expect(first).toContain("[go](./Other.md)");
   });
 
+  it("parses consecutive notes without leaking wiki matches", () => {
+    const first = serializeMarkdown(parseMarkdown("See [[Alpha]]\n"));
+    const second = serializeMarkdown(parseMarkdown("See [[Beta]]\n"));
+    expect(first).toContain("[[Alpha]]");
+    expect(first).not.toContain("[[Beta]]");
+    expect(second).toContain("[[Beta]]");
+    expect(second).not.toContain("[[Alpha]]");
+  });
+
   it("maps wiki links with optional alias", () => {
     const doc = parseMarkdown("See [[Other]] and [[Other|别名]].\n");
     const out = serializeMarkdown(doc);
@@ -71,5 +80,21 @@ A **bold** and *em* and \`code\`.
     expect(codeOut).toContain("[[FakeFence]]");
     expect(codeOut).toContain("[[FakeInline]]");
     expect(codeOut).toContain("[[Other]]");
+  });
+
+  it("parses a list item that starts with a nested list", () => {
+    const source = `- 
+  - child
+`;
+    expect(() => parseMarkdown(source)).not.toThrow();
+    const doc = parseMarkdown(source);
+    expect(serializeMarkdown(doc)).toContain("child");
+  });
+
+  it("parses an empty blockquote without throwing", () => {
+    const source = `>
+`;
+    expect(() => parseMarkdown(source)).not.toThrow();
+    expect(serializeMarkdown(parseMarkdown(source))).toContain(">");
   });
 });

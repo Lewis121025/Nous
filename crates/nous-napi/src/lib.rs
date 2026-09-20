@@ -43,8 +43,9 @@ pub fn vault_open(root: String, index_dir: String, on_changed: JsFunction) -> Re
     let vault = Arc::new(Vault::open(&root, &index_dir).map_err(to_napi)?);
     let watched = Arc::clone(&vault);
     let watch = nous_core::start_watch(root, Duration::from_millis(300), move || {
-        let _ = watched.refresh_index();
-        tsfn.call(true, ThreadsafeFunctionCallMode::NonBlocking);
+        if matches!(watched.refresh_index(), Ok(true)) {
+            tsfn.call(true, ThreadsafeFunctionCallMode::NonBlocking);
+        }
     })
     .map_err(to_napi)?;
     let mut state = lock_state()?;

@@ -124,24 +124,86 @@ pub(crate) fn replace_all(
             ])?;
         }
     }
-    {
-        let mut insert_link = tx.prepare(
-            "INSERT INTO links(from_path, to_raw, to_path, kind, start_byte, end_byte)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )?;
-        for link in links {
-            insert_link.execute(params![
-                link.from_path,
-                link.to_raw,
-                link.to_path,
-                link.kind.as_str(),
-                link.start_byte,
-                link.end_byte
-            ])?;
-        }
-    }
+    insert_link_rows(&tx, links)?;
     tx.commit()?;
     conn.pragma_update(None, "user_version", SCAN_VERSION)?;
+    Ok(())
+}
+
+/// 只更新一篇文件及其出链，其它行的 `rowid` 保持不变。
+///
+/// # Errors
+///
+/// `SQLite` 失败时返回错误。
+pub(crate) fn upsert_file(
+    conn: &Connection,
+    file: &FileRow,
+    outgoing: &[LinkRecord],
+) -> Result<(), Error> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM links WHERE from_path = ?1", params![file.path])?;
+    tx.execute(
+        "INSERT INTO files(path, title, kind, mtime, content_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(path) DO UPDATE SET
+            title = excluded.title,
+            kind = excluded.kind,
+            mtime = excluded.mtime,
+            content_hash = excluded.content_hash",
+        params![
+            file.path,
+            file.title,
+            file.kind,
+            file.mtime,
+            file.content_hash
+        ],
+    )?;
+    insert_link_rows(&tx, outgoing)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// 删除一篇文件及其出链。
+///
+/// # Errors
+///
+/// `SQLite` 失败时返回错误。
+pub(crate) fn delete_file(conn: &Connection, path: &str) -> Result<(), Error> {
+    conn.execute("DELETE FROM links WHERE from_path = ?1", params![path])?;
+    conn.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+    Ok(())
+}
+
+/// 用当前链接集合替换 `links` 表，不动 `files`。
+///
+/// 文件集合变了、需要重绑 `to_path` 时用这个，避免把未改动的文件行删掉重建。
+///
+/// # Errors
+///
+/// `SQLite` 失败时返回错误。
+pub(crate) fn replace_links(conn: &Connection, links: &[LinkRecord]) -> Result<(), Error> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch("DELETE FROM links;")?;
+    insert_link_rows(&tx, links)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn insert_link_rows(tx: &rusqlite::Transaction<'_>, links: &[LinkRecord]) -> Result<(), Error> {
+    let mut insert_link = tx.prepare(
+        "INSERT INTO links(from_path, to_raw, to_path, kind, start_byte, end_byte)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    for link in links {
+        insert_link.execute(params![
+            link.from_path,
+            link.to_raw,
+            link.to_path,
+            link.kind.as_str(),
+            link.start_byte,
+            link.end_byte
+        ])?;
+    }
     Ok(())
 }
 

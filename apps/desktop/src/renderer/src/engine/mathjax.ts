@@ -70,7 +70,7 @@ function errorNode(tex: string, display: boolean, message: string): HTMLElement 
 }
 
 /**
- * 打开含公式笔记时付清成本：加载引擎、预热字形、排完本篇并写入缓存。
+ * 后台把本篇公式排进 LRU。不阻塞编辑器挂载，也不预热整套字形表。
  *
  * 无公式则立即返回，且不会 import MathJax。
  *
@@ -84,15 +84,11 @@ export async function warmupMath(doc: PmNode, styleRoot: HTMLElement): Promise<v
   }
   const engine = await loadEngine();
   engine.attachStyles(styleRoot);
-  await engine.loadDynamicFiles();
   const unique = new Map<string, { tex: string; display: boolean }>();
   for (const item of items) {
     unique.set(cacheKey(item.tex, item.display), item);
   }
   await Promise.all([...unique.values()].map((item) => renderTex(item.tex, item.display)));
-  if (document.fonts !== undefined) {
-    await document.fonts.ready;
-  }
 }
 
 /**

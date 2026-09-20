@@ -11,6 +11,7 @@
   import { buildOutlineTree, outlineEquals, type OutlineItem } from "./engine/outline";
   import { shouldApplyReload } from "./engine/reload";
   import { bytesForSave, commitSuccessfulWrite } from "./engine/save";
+  import { uniqueBacklinks } from "./engine/backlinks";
   import type { LinkRecord } from "../../shared/api";
 
   let files = $state<string[]>([]);
@@ -35,6 +36,7 @@
   let editGen = 0;
   const outlineTree = $derived(buildOutlineTree(outline));
   const collapsedKeys = $derived(current === null ? [] : (collapsedByFile[current] ?? []));
+  const backlinkSources = $derived(uniqueBacklinks(backlinks));
 
   const autosave = createAutosave({
     isDirty: () => dirty,
@@ -452,7 +454,7 @@
 
         <h2>入链</h2>
         <ul class="backlinks">
-          {#each backlinks as link, index (`${link.fromPath}:${link.startByte}:${index}`)}
+          {#each backlinkSources as link (link.fromPath)}
             <li>
               {#if link.toPath !== null}
                 <button type="button" class="link" onclick={() => void openFile(link.fromPath)}>
@@ -570,6 +572,8 @@
     background: var(--bg);
     color: var(--fg);
     cursor: pointer;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 2.2rem;
   }
 
   .file.active {

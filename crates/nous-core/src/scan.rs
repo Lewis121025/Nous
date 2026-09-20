@@ -12,24 +12,15 @@ fn wiki_regex() -> &'static Regex {
     WIKI.get_or_init(|| Regex::new(r"\[\[([^\[\]]+)\]\]").expect("wiki 正则"))
 }
 
-/// 扫描一篇 Markdown 的出链（尚未解析 `to_path`）。
-///
-/// 围栏代码与行内代码中的 `[[ ]]` 会被跳过。外部 URL 不收录。
+/// 一次解析同时取出标题与出链，避免同一篇走两遍 `to_mdast`。
 #[must_use]
-pub fn extract_links(from_path: &str, source: &str) -> Vec<LinkRecord> {
+pub fn scan_markdown(from_path: &str, source: &str) -> (Option<String>, Vec<LinkRecord>) {
     let Ok(tree) = to_mdast(source, &ParseOptions::default()) else {
-        return Vec::new();
+        return (None, Vec::new());
     };
-    let mut out = Vec::new();
-    walk(&tree, from_path, source, &mut out);
-    out
-}
-
-/// 取文中第一个标题的纯文本；没有标题则返回 `None`。
-#[must_use]
-pub fn first_heading(source: &str) -> Option<String> {
-    let tree = to_mdast(source, &ParseOptions::default()).ok()?;
-    find_heading(&tree)
+    let mut links = Vec::new();
+    walk(&tree, from_path, source, &mut links);
+    (find_heading(&tree), links)
 }
 
 fn find_heading(node: &Node) -> Option<String> {

@@ -25,6 +25,7 @@ import { isImageFileName } from "./media";
 import { documentSchema } from "./schema";
 
 const wikiPattern = /\[\[([^[\]]+)\]\]/g;
+const markdownParser = unified().use(remarkParse).use(remarkGfm).use(remarkMath);
 
 /**
  * 把 Markdown 源解析为 ProseMirror 文档。
@@ -33,7 +34,7 @@ const wikiPattern = /\[\[([^[\]]+)\]\]/g;
  * @returns schema 约束下的文档节点。
  */
 export function parseMarkdown(source: string): PmNode {
-  const tree = unified().use(remarkParse).use(remarkGfm).use(remarkMath).parse(source);
+  const tree = markdownParser.parse(source);
   const blocks = tree.children.flatMap((child) => mapBlock(child));
   const content = blocks.length === 0 ? documentSchema.node("paragraph", null, []) : blocks;
   return documentSchema.node("doc", null, content);
@@ -45,14 +46,11 @@ function mapBlock(node: RootContent | ListItem["children"][number]): PmNode[] {
       return [mapHeading(node)];
     case "paragraph":
       return [documentSchema.node("paragraph", null, mapPhrasing(node.children))];
-    case "blockquote":
-      return [
-        documentSchema.node(
-          "blockquote",
-          null,
-          node.children.flatMap((child) => mapBlock(child)),
-        ),
-      ];
+    case "blockquote": {
+      const inner = node.children.flatMap((child) => mapBlock(child));
+      const content = inner.length === 0 ? [documentSchema.node("paragraph", null, [])] : inner;
+      return [documentSchema.node("blockquote", null, content)];
+    }
     case "list":
       return [mapList(node)];
     case "code":
@@ -95,7 +93,11 @@ function mapList(node: List): PmNode {
 
 function mapListItem(node: ListItem): PmNode {
   const mapped = node.children.flatMap((child) => mapBlock(child));
-  const content = mapped.length === 0 ? [documentSchema.node("paragraph", null, [])] : mapped;
+  // schema 要求 list_item 以 paragraph 开头；子列表/代码块若排第一位会抛错，编辑器整篇空白。
+  const content =
+    mapped[0]?.type.name === "paragraph"
+      ? mapped
+      : [documentSchema.node("paragraph", null, []), ...mapped];
   const checked = node.checked === true || node.checked === false ? node.checked : null;
   return documentSchema.node("list_item", { checked }, content);
 }
