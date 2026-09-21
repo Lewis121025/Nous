@@ -61,3 +61,79 @@ describe("outline jump", () => {
     target.remove();
   });
 });
+
+describe("mention jump", () => {
+  afterEach(() => {
+    HTMLElement.prototype.scrollIntoView = OriginalScrollIntoView;
+  });
+
+  it("scrolls a wiki mention to the center of the reading pane", () => {
+    const scrolled: Array<{ tag: string; text: string; options: unknown }> = [];
+    HTMLElement.prototype.scrollIntoView = function scrollIntoView(this: HTMLElement, options?: unknown) {
+      scrolled.push({
+        tag: this.tagName,
+        text: this.textContent?.trim() ?? "",
+        options,
+      });
+    };
+
+    const target = document.createElement("div");
+    document.body.append(target);
+    let api: MarkdownEditorApi | null = null;
+    const app = mount(DocumentEditor as Component, {
+      target,
+      props: {
+        path: "Note.md",
+        source: "intro\n\nSee [[Target]] here\n",
+        onDirty: () => {},
+        onSave: () => {},
+        onOpenLink: () => {},
+        onOutline: () => {},
+        register: (next: MarkdownEditorApi | null) => {
+          api = next;
+        },
+      },
+    });
+    flushSync();
+
+    expect(api).not.toBeNull();
+    api?.jumpToMention({ kind: "linked", linkKind: "wiki", toRaw: "Target" }, 1);
+
+    expect(scrolled.some((item) => item.options && typeof item.options === "object" && "block" in item.options && item.options.block === "center")).toBe(true);
+
+    unmount(app);
+    target.remove();
+  });
+
+  it("jumps to unlinked paragraph text without throwing", () => {
+    const target = document.createElement("div");
+    const main = document.createElement("div");
+    main.className = "main";
+    main.append(target);
+    document.body.append(main);
+    let api: MarkdownEditorApi | null = null;
+    const app = mount(DocumentEditor as Component, {
+      target,
+      props: {
+        path: "Note.md",
+        source: `${"para\n\n".repeat(40)}UniqueHitWord in a paragraph\n`,
+        onDirty: () => {},
+        onSave: () => {},
+        onOpenLink: () => {},
+        onOutline: () => {},
+        register: (next: MarkdownEditorApi | null) => {
+          api = next;
+        },
+      },
+    });
+    flushSync();
+
+    expect(api).not.toBeNull();
+    expect(() => {
+      api?.jumpToMention({ kind: "unlinked", linkKind: null, toRaw: "UniqueHitWord" }, 1);
+    }).not.toThrow();
+
+    unmount(app);
+    main.remove();
+  });
+});

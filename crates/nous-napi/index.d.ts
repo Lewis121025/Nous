@@ -70,6 +70,34 @@ export interface JsLinkRecord {
   /** 字节区间终点（不含）。 */
   endByte: number
 }
+/** 一条已链接或未链接提及。 */
+export interface JsMentionRecord {
+  /** 源文件相对路径。 */
+  fromPath: string
+  /** 源文件展示标题。 */
+  fromTitle: string
+  /** 源文件内容修改时间（自纪元起的纳秒）。 */
+  mtime: number
+  /** 命中区间起点（含）。 */
+  startByte: number
+  /** 命中区间终点（不含）。 */
+  endByte: number
+  /** 命中所在段落。 */
+  snippet: string
+  /** `linked` 或 `unlinked`。 */
+  kind: string
+  /** 已链接时为 `wiki`/`md`；未链接为 `null`。 */
+  linkKind?: string
+  /** 已链接为链接原文目标；未链接为命中文本。 */
+  toRaw: string
+}
+/** 指向一篇笔记的已链接与未链接提及。 */
+export interface JsMentions {
+  /** 索引里的入链。 */
+  linked: Array<JsMentionRecord>
+  /** 正文里尚未做成链接的出现。 */
+  unlinked: Array<JsMentionRecord>
+}
 /**
  * 指向 `path` 的入链。
  *
@@ -86,6 +114,14 @@ export declare function indexLinksTo(path: string): Array<JsLinkRecord>
  * 未打开库。
  */
 export declare function indexLinksFrom(path: string): Array<JsLinkRecord>
+/**
+ * 指向 `path` 的已链接提及与未链接提及。
+ *
+ * # Errors
+ *
+ * 未打开库。
+ */
+export declare function indexMentionsTo(path: string): JsMentions
 /**
  * 改名并更新全库链接。
  *

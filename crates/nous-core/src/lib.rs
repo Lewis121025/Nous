@@ -6,6 +6,7 @@
 mod error;
 mod index;
 mod link;
+mod mention;
 mod pathutil;
 mod rewrite;
 mod scan;
@@ -14,5 +15,6 @@ mod watch;
 
 pub use error::Error;
 pub use link::{LinkKind, LinkRecord};
+pub use mention::{MentionKind, MentionRecord, Mentions};
 pub use vault::Vault;
 pub use watch::{start_watch, WatchHandle};

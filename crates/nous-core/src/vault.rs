@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::error::Error;
 use crate::index::{self, FileRow};
 use crate::link::LinkRecord;
+use crate::mention::{self, MentionKind, MentionRecord, Mentions};
 use crate::pathutil::resolve_in_root;
 use crate::scan;
 
@@ -280,6 +281,101 @@ impl Vault {
     pub fn links_to(&self, path: &str) -> Result<Vec<LinkRecord>, Error> {
         let conn = self.lock_conn()?;
         index::links_to(&conn, path)
+    }
+
+    /// 指向 `path` 的已链接提及与未链接提及。
+    ///
+    /// 未链接在查询时扫其它 Markdown，不写索引。
+    ///
+    /// # Errors
+    ///
+    /// 索引查询失败。单个 Markdown 读失败则跳过该文件。
+    pub fn mentions_to(&self, path: &str) -> Result<Mentions, Error> {
+        let (files, linked_links) = {
+            let conn = self.lock_conn()?;
+            (index::load_files(&conn)?, index::links_to(&conn, path)?)
+        };
+        let file_map: HashMap<String, FileRow> = files
+            .into_iter()
+            .map(|row| (row.path.clone(), row))
+            .collect();
+        let title = file_map.get(path).map_or("", |row| row.title.as_str());
+        let needles = mention::mention_needles(title, path);
+        let linked = self.mentions_from_links(&linked_links, &file_map);
+        let mut unlinked = Vec::new();
+        for rel in self.list_files()? {
+            if rel == path || !is_markdown(&rel) {
+                continue;
+            }
+            let Ok(bytes) = self.read(&rel) else {
+                continue;
+            };
+            let Ok(source) = String::from_utf8(bytes) else {
+                continue;
+            };
+            let hits = mention::find_unlinked(&rel, &source, &needles);
+            let meta = file_map.get(&rel);
+            let from_title =
+                meta.map_or_else(|| file_title_fallback(&rel), |row| row.title.clone());
+            let mtime = meta.map_or(0, |row| row.mtime);
+            for (start, end) in hits {
+                let start_byte = i64::try_from(start).unwrap_or(i64::MAX);
+                let end_byte = i64::try_from(end).unwrap_or(i64::MAX);
+                unlinked.push(MentionRecord {
+                    from_path: rel.clone(),
+                    from_title: from_title.clone(),
+                    mtime,
+                    start_byte,
+                    end_byte,
+                    snippet: mention::paragraph_snippet(&source, start, end),
+                    kind: MentionKind::Unlinked,
+                    link_kind: None,
+                    to_raw: source.get(start..end).unwrap_or("").to_string(),
+                });
+            }
+        }
+        Ok(Mentions { linked, unlinked })
+    }
+
+    fn mentions_from_links(
+        &self,
+        links: &[LinkRecord],
+        files: &HashMap<String, FileRow>,
+    ) -> Vec<MentionRecord> {
+        let mut sources: HashMap<String, Option<String>> = HashMap::new();
+        let mut out = Vec::with_capacity(links.len());
+        for link in links {
+            if !sources.contains_key(&link.from_path) {
+                let text = match self.read(&link.from_path) {
+                    Ok(bytes) => String::from_utf8(bytes).ok(),
+                    Err(_) => None,
+                };
+                sources.insert(link.from_path.clone(), text);
+            }
+            let Some(Some(source)) = sources.get(&link.from_path) else {
+                continue;
+            };
+            let meta = files.get(&link.from_path);
+            let from_title = meta.map_or_else(
+                || file_title_fallback(&link.from_path),
+                |row| row.title.clone(),
+            );
+            let mtime = meta.map_or(0, |row| row.mtime);
+            let start = usize::try_from(link.start_byte).unwrap_or(0);
+            let end = usize::try_from(link.end_byte).unwrap_or(0);
+            out.push(MentionRecord {
+                from_path: link.from_path.clone(),
+                from_title,
+                mtime,
+                start_byte: link.start_byte,
+                end_byte: link.end_byte,
+                snippet: mention::paragraph_snippet(source, start, end),
+                kind: MentionKind::Linked,
+                link_kind: Some(link.kind),
+                to_raw: link.to_raw.clone(),
+            });
+        }
+        out
     }
 
     /// `path` 的出链。

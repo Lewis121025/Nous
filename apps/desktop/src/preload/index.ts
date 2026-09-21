@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { LinkKind, LinkRecord, NousApi, PaneLayout, VaultRestore } from "../shared/api";
+import type {
+  LinkKind,
+  LinkRecord,
+  Mentions,
+  NousApi,
+  PaneLayout,
+  VaultRestore,
+} from "../shared/api";
 
 const api: NousApi = {
   vaultOpen: () => ipcRenderer.invoke("vault.open") as Promise<string | null>,
@@ -16,6 +23,8 @@ const api: NousApi = {
     ipcRenderer.invoke("links.resolve", from, raw, kind) as Promise<string | null>,
   indexLinksTo: (path: string) =>
     ipcRenderer.invoke("index.linksTo", path) as Promise<LinkRecord[]>,
+  indexMentionsTo: (path: string) =>
+    ipcRenderer.invoke("index.mentionsTo", path) as Promise<Mentions>,
   indexLinksFrom: (path: string) =>
     ipcRenderer.invoke("index.linksFrom", path) as Promise<LinkRecord[]>,
   entryRename: (from: string, to: string) =>

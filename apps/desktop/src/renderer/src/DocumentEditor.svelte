@@ -14,6 +14,7 @@
   import { createImageNodeViews } from "./engine/image-view";
   import { mathInputPlugins, mathNodeViews } from "./engine/math-view";
   import { parseMarkdown, serializeMarkdown } from "./engine/markdown";
+  import { findMentionPmPos } from "./engine/mention-jump";
   import { browserMediaIo, resolveMediaUrl } from "./engine/media";
   import { collectOutline, type OutlineItem } from "./engine/outline";
 
@@ -126,18 +127,14 @@
       bindApi({
         serialize: () => serializeMarkdown(created.state.doc),
         jumpTo: (pos) => {
-          const { doc } = created.state;
-          if (pos < 0 || pos >= doc.content.size) {
+          jumpEditor(created, pos, "start");
+        },
+        jumpToMention: (mention, occurrence) => {
+          const pos = findMentionPmPos(created.state.doc, mention, occurrence);
+          if (pos === null) {
             return;
           }
-          const resolved = doc.resolve(Math.min(pos + 1, doc.content.size));
-          created.dispatch(created.state.tr.setSelection(TextSelection.near(resolved)));
-          created.focus();
-          const dom = created.nodeDOM(pos);
-          if (dom instanceof HTMLElement) {
-            // 目录要对齐到阅读区顶部。PM 的 scrollIntoView 只保证「勉强看见」，标题会被贴在底部。
-            dom.scrollIntoView({ block: "start", inline: "nearest" });
-          }
+          jumpEditor(created, pos, "center");
         },
       });
       return () => {
@@ -148,6 +145,42 @@
       };
     });
   });
+
+  function jumpEditor(view: EditorView, pos: number, block: ScrollLogicalPosition): void {
+    const { doc } = view.state;
+    if (pos < 0 || pos >= doc.content.size) {
+      return;
+    }
+    const resolved = doc.resolve(Math.min(pos + 1, doc.content.size));
+    view.dispatch(view.state.tr.setSelection(TextSelection.near(resolved)).scrollIntoView());
+    view.focus();
+    const nodeDom = view.nodeDOM(pos);
+    if (nodeDom instanceof HTMLElement) {
+      // 目录要对齐到阅读区顶部。PM 的 scrollIntoView 只保证「勉强看见」，标题会被贴在底部。
+      // 入链命中落在段落里，居中更容易看见。
+      nodeDom.scrollIntoView({ block, inline: "nearest" });
+      return;
+    }
+    const scroller = view.dom.closest(".main");
+    if (!(scroller instanceof HTMLElement)) {
+      return;
+    }
+    // jsdom 的 Text 没有 getClientRects；真实窗口里极少数位置也会让 coordsAtPos 扔。
+    // 上面事务已经 scrollIntoView，这里只是尽量居中。
+    let coords: { top: number; bottom: number };
+    try {
+      coords = view.coordsAtPos(pos);
+    } catch {
+      return;
+    }
+    const rect = scroller.getBoundingClientRect();
+    if (block === "start") {
+      scroller.scrollTop += coords.top - rect.top;
+      return;
+    }
+    const mid = (coords.top + coords.bottom) / 2;
+    scroller.scrollTop += mid - (rect.top + rect.height / 2);
+  }
 
   function isExternalHref(href: string): boolean {
     return /^[a-z][a-z0-9+.-]*:/i.test(href);

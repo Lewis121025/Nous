@@ -10,10 +10,11 @@
     indentOnInput,
     syntaxHighlighting,
   } from "@codemirror/language";
-  import { EditorState, Compartment } from "@codemirror/state";
+  import { EditorState, Compartment, EditorSelection } from "@codemirror/state";
   import { EditorView, keymap, lineNumbers } from "@codemirror/view";
   import type { CodeEditorApi } from "./engine/editor-api";
   import { languageExtensions } from "./engine/language";
+  import { utf8ByteToJsIndex } from "./engine/mention-jump";
 
   type Props = {
     /** 打开时的文本。 */
@@ -88,6 +89,17 @@
       });
       bindApi({
         getText: () => view.state.doc.toString(),
+        jumpToByte: (byteOffset) => {
+          const index = Math.min(
+            view.state.doc.length,
+            utf8ByteToJsIndex(view.state.doc.toString(), byteOffset),
+          );
+          view.dispatch({
+            selection: EditorSelection.cursor(index),
+            scrollIntoView: true,
+          });
+          view.focus();
+        },
       });
       void languageExtensions(currentPath).then((lang) => {
         if (cancelled) {

@@ -30,6 +30,10 @@ name = "links_unit_scan"
 path = "../../tests/links/unit/scan.rs"
 
 [[test]]
+name = "links_unit_mentions"
+path = "../../tests/links/unit/mentions.rs"
+
+[[test]]
 name = "links_integration_rename"
 path = "../../tests/links/integration/rename.rs"
 

@@ -160,6 +160,52 @@ fn to_js(link: nous_core::LinkRecord) -> JsLinkRecord {
     }
 }
 
+/// 一条已链接或未链接提及。
+#[napi(object)]
+pub struct JsMentionRecord {
+    /// 源文件相对路径。
+    pub from_path: String,
+    /// 源文件展示标题。
+    pub from_title: String,
+    /// 源文件内容修改时间（自纪元起的纳秒）。
+    pub mtime: i64,
+    /// 命中区间起点（含）。
+    pub start_byte: i64,
+    /// 命中区间终点（不含）。
+    pub end_byte: i64,
+    /// 命中所在段落。
+    pub snippet: String,
+    /// `linked` 或 `unlinked`。
+    pub kind: String,
+    /// 已链接时为 `wiki`/`md`；未链接为 `null`。
+    pub link_kind: Option<String>,
+    /// 已链接为链接原文目标；未链接为命中文本。
+    pub to_raw: String,
+}
+
+/// 指向一篇笔记的已链接与未链接提及。
+#[napi(object)]
+pub struct JsMentions {
+    /// 索引里的入链。
+    pub linked: Vec<JsMentionRecord>,
+    /// 正文里尚未做成链接的出现。
+    pub unlinked: Vec<JsMentionRecord>,
+}
+
+fn to_js_mention(mention: nous_core::MentionRecord) -> JsMentionRecord {
+    JsMentionRecord {
+        from_path: mention.from_path,
+        from_title: mention.from_title,
+        mtime: mention.mtime,
+        start_byte: mention.start_byte,
+        end_byte: mention.end_byte,
+        snippet: mention.snippet,
+        kind: mention.kind.as_str().to_string(),
+        link_kind: mention.link_kind.map(|kind| kind.as_str().to_string()),
+        to_raw: mention.to_raw,
+    }
+}
+
 /// 指向 `path` 的入链。
 ///
 /// # Errors
@@ -196,6 +242,24 @@ pub fn index_links_from(path: String) -> Result<Vec<JsLinkRecord>> {
         .into_iter()
         .map(to_js)
         .collect())
+}
+
+/// 指向 `path` 的已链接提及与未链接提及。
+///
+/// # Errors
+///
+/// 未打开库。
+#[napi]
+pub fn index_mentions_to(path: String) -> Result<JsMentions> {
+    let state = lock_state()?;
+    let state = state
+        .as_ref()
+        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
+    let mentions = vault_ref(state).mentions_to(&path).map_err(to_napi)?;
+    Ok(JsMentions {
+        linked: mentions.linked.into_iter().map(to_js_mention).collect(),
+        unlinked: mentions.unlinked.into_iter().map(to_js_mention).collect(),
+    })
 }
 
 /// 改名并更新全库链接。

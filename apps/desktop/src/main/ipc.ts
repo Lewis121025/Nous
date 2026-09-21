@@ -4,9 +4,17 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { app, dialog, ipcMain } from "electron";
 import type { BrowserWindow } from "electron";
-import type { LinkKind, LinkRecord, PaneLayout, VaultRestore } from "../shared/api";
+import type {
+  LinkKind,
+  LinkRecord,
+  MentionRecord,
+  Mentions,
+  PaneLayout,
+  VaultRestore,
+} from "../shared/api";
+import { parseLinkKind, parseMentionKind } from "../shared/api";
 import { onFlushResult, type CloseGate } from "./close-gate";
-import { loadSession, patchSession, sessionFile } from "./session";
+import { loadSession, parsePaneLayout, patchSession, sessionFile, type Session } from "./session";
 
 const require = createRequire(import.meta.url);
 
@@ -19,6 +27,7 @@ type NativeAddon = {
   linksResolve: (from: string, raw: string, kind: string) => string | null;
   indexLinksTo: (path: string) => NativeLink[];
   indexLinksFrom: (path: string) => NativeLink[];
+  indexMentionsTo: (path: string) => NativeMentions;
   entryRename: (from: string, to: string) => void;
 };
 
@@ -29,6 +38,23 @@ type NativeLink = {
   kind: string;
   startByte: number;
   endByte: number;
+};
+
+type NativeMention = {
+  fromPath: string;
+  fromTitle: string;
+  mtime: number;
+  startByte: number;
+  endByte: number;
+  snippet: string;
+  kind: string;
+  linkKind?: string;
+  toRaw: string;
+};
+
+type NativeMentions = {
+  linked: NativeMention[];
+  unlinked: NativeMention[];
 };
 
 const native = require("@nous/native") as NativeAddon;
@@ -59,6 +85,49 @@ function mapLink(link: NativeLink): LinkRecord {
     kind,
     startByte: link.startByte,
     endByte: link.endByte,
+  };
+}
+
+function mapMention(mention: NativeMention): MentionRecord | null {
+  const kind = parseMentionKind(mention.kind);
+  if (kind === null) {
+    return null;
+  }
+  return {
+    fromPath: mention.fromPath,
+    fromTitle: mention.fromTitle,
+    mtime: mention.mtime,
+    startByte: mention.startByte,
+    endByte: mention.endByte,
+    snippet: mention.snippet,
+    kind,
+    linkKind: kind === "linked" ? parseLinkKind(mention.linkKind ?? "") : null,
+    toRaw: mention.toRaw,
+  };
+}
+
+function mapMentions(value: NativeMentions): Mentions {
+  return {
+    linked: value.linked.flatMap((item) => {
+      const mapped = mapMention(item);
+      return mapped === null ? [] : [mapped];
+    }),
+    unlinked: value.unlinked.flatMap((item) => {
+      const mapped = mapMention(item);
+      return mapped === null ? [] : [mapped];
+    }),
+  };
+}
+
+function panesFromSession(session: Session): PaneLayout {
+  return {
+    filesCollapsed: session.filesCollapsed,
+    leftWidth: session.leftWidth,
+    rightCollapsed: session.rightCollapsed,
+    rightWidth: session.rightWidth,
+    rightSplit: session.rightSplit,
+    rightSlots: session.rightSlots,
+    backlinksInDocument: session.backlinksInDocument,
   };
 }
 
@@ -110,19 +179,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null, closeGate: Cl
 
   ipcMain.handle("session.getPanes", (): PaneLayout => {
     const session = loadSession(sessionPath());
-    return {
-      filesCollapsed: session.filesCollapsed,
-      outlineCollapsed: session.outlineCollapsed,
-    };
+    return panesFromSession(session);
   });
 
   ipcMain.handle("session.setPanes", (_event, panes: unknown) => {
-    if (typeof panes !== "object" || panes === null) {
+    const parsed = parsePaneLayout(panes);
+    if (parsed === null) {
       return;
     }
-    const filesCollapsed = "filesCollapsed" in panes && panes.filesCollapsed === true;
-    const outlineCollapsed = "outlineCollapsed" in panes && panes.outlineCollapsed === true;
-    patchSession(sessionPath(), { filesCollapsed, outlineCollapsed });
+    patchSession(sessionPath(), parsed);
   });
 
   ipcMain.handle("vault.close", () => {
@@ -150,6 +215,10 @@ export function registerIpc(getWindow: () => BrowserWindow | null, closeGate: Cl
 
   ipcMain.handle("index.linksFrom", (_event, path: string) => {
     return native.indexLinksFrom(path).map(mapLink);
+  });
+
+  ipcMain.handle("index.mentionsTo", (_event, path: string) => {
+    return mapMentions(native.indexMentionsTo(path));
   });
 
   ipcMain.handle("entry.rename", (_event, from: string, to: string) => {
