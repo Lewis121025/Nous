@@ -5,6 +5,14 @@
  */
 import { Schema, type DOMOutputSpec, type MarkSpec, type NodeSpec } from "prosemirror-model";
 
+const mediaAttrs = {
+  src: { default: "" },
+  alt: { default: "" },
+  title: { default: null },
+  kind: { default: "md" },
+  reference: { default: null },
+};
+
 const nodes: Record<string, NodeSpec> = {
   doc: { content: "block+" },
   paragraph: {
@@ -35,13 +43,14 @@ const nodes: Record<string, NodeSpec> = {
     toDOM: () => ["blockquote", 0],
   },
   bullet_list: {
+    attrs: { spread: { default: false } },
     content: "list_item+",
     group: "block",
     parseDOM: [{ tag: "ul" }],
     toDOM: () => ["ul", 0],
   },
   ordered_list: {
-    attrs: { order: { default: 1 } },
+    attrs: { order: { default: 1 }, spread: { default: false } },
     content: "list_item+",
     group: "block",
     parseDOM: [{ tag: "ol" }],
@@ -49,7 +58,7 @@ const nodes: Record<string, NodeSpec> = {
   },
   list_item: {
     content: "paragraph block*",
-    attrs: { checked: { default: null } },
+    attrs: { checked: { default: null }, spread: { default: false } },
     parseDOM: [
       {
         tag: "li",
@@ -77,7 +86,7 @@ const nodes: Record<string, NodeSpec> = {
     },
   },
   code_block: {
-    attrs: { params: { default: "" } },
+    attrs: { params: { default: "" }, meta: { default: null } },
     content: "text*",
     group: "block",
     code: true,
@@ -91,16 +100,38 @@ const nodes: Record<string, NodeSpec> = {
     parseDOM: [{ tag: "hr" }],
     toDOM: () => ["hr"],
   },
+  markdown_block: {
+    content: "text*",
+    group: "block",
+    code: true,
+    defining: true,
+    marks: "",
+    parseDOM: [
+      { tag: 'pre[data-markdown-source="block"]', priority: 60, preserveWhitespace: "full" },
+    ],
+    toDOM: () => ["pre", { "data-markdown-source": "block" }, ["code", 0]],
+  },
+  markdown_inline: {
+    inline: true,
+    atom: true,
+    group: "inline",
+    attrs: { source: { default: "" } },
+    parseDOM: [
+      {
+        tag: "span[data-markdown-source]",
+        getAttrs: (dom) => ({ source: dom.getAttribute("data-markdown-source") ?? "" }),
+      },
+    ],
+    toDOM: (node) => {
+      const source = String(node.attrs["source"] ?? "");
+      return ["span", { "data-markdown-source": source }, source];
+    },
+  },
   image: {
     inline: true,
     atom: true,
     group: "inline",
-    attrs: {
-      src: { default: "" },
-      alt: { default: "" },
-      title: { default: null },
-      kind: { default: "md" },
-    },
+    attrs: mediaAttrs,
     parseDOM: [{ tag: "img[data-image-src]", getAttrs: imageDomAttrs }],
     toDOM: (node) => {
       const src = String(node.attrs["src"] ?? "");
@@ -118,6 +149,35 @@ const nodes: Record<string, NodeSpec> = {
       }
       return ["img", attrs];
     },
+  },
+  pdf: {
+    inline: true,
+    atom: true,
+    group: "inline",
+    attrs: mediaAttrs,
+    parseDOM: [
+      {
+        tag: "span[data-pdf-src]",
+        getAttrs: (dom) => ({
+          src: dom.getAttribute("data-pdf-src"),
+          alt: dom.getAttribute("data-pdf-alt") ?? "",
+          title: dom.getAttribute("data-pdf-title"),
+          kind: dom.getAttribute("data-pdf-kind") ?? "md",
+          reference: dom.getAttribute("data-pdf-reference"),
+        }),
+      },
+    ],
+    toDOM: (node) => [
+      "span",
+      {
+        "data-pdf-src": node.attrs["src"],
+        "data-pdf-alt": node.attrs["alt"],
+        "data-pdf-title": node.attrs["title"],
+        "data-pdf-kind": node.attrs["kind"],
+        "data-pdf-reference": node.attrs["reference"],
+      },
+      String(node.attrs["alt"] || node.attrs["src"]),
+    ],
   },
   wiki_link: {
     inline: true,
@@ -319,7 +379,7 @@ const marks: Record<string, MarkSpec> = {
   },
   code: { parseDOM: [{ tag: "code" }], toDOM: () => ["code", 0] },
   link: {
-    attrs: { href: { default: "" }, title: { default: null } },
+    attrs: { href: { default: "" }, title: { default: null }, reference: { default: null } },
     inclusive: false,
     parseDOM: [{ tag: "a[href]" }],
     toDOM: (node) => ["a", { href: node.attrs["href"] as string }, 0],

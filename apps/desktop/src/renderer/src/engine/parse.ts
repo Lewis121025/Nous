@@ -1,368 +1,230 @@
-/**
- * Markdown → ProseMirror。
- *
- * 使用 remark/micromark 解析，再映射到文档 schema；wiki 在文本节点上二次识别，
- * 并还原 remark 把 `[[target]]` 拆成 linkReference 的情况。
- * `$`/`$$` 由 remark-math 识别；math 节点必须显式映射，否则会落入 default 被丢掉。
- * 行内 HTML 由 micromark 拆成相邻 html 词元，必须拼回一条 html_inline。
- * GFM 表格 / 任务列表 / 删除线 / 图片必须显式映射，否则会落入 default 被丢掉。
- */
-import type {
-  Heading,
-  Link,
-  LinkReference,
-  List,
-  ListItem,
-  PhrasingContent,
-  RootContent,
-} from "mdast";
-import type { Node as PmNode } from "prosemirror-model";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import remarkParse from "remark-parse";
-import { unified } from "unified";
-import { isImageFileName } from "./media";
+/** Markdown 映射到编辑器；暂未提供富文本编辑的语法以可保留的源码节点承载。 */
+import type { Definition, Nodes, PhrasingContent, RootContent } from "mdast";
+import { decodeString } from "micromark-util-decode-string";
+import type { Mark, Node as PmNode } from "prosemirror-model";
+import { markdownProcessor } from "./markdown-processor";
+import { previewKindFromReference } from "./media";
 import { documentSchema } from "./schema";
 
-const wikiPattern = /\[\[([^[\]]+)\]\]/g;
-const markdownParser = unified().use(remarkParse).use(remarkGfm).use(remarkMath);
+type Definitions = ReadonlyMap<string, Definition>;
 
 /**
- * 把 Markdown 源解析为 ProseMirror 文档。
+ * 把 Markdown 映射为文档，引用定义与脚注等未支持的节点也必须保留。
  *
- * @param source UTF-8 Markdown 文本。
+ * @param source Markdown 原文。
  * @returns schema 约束下的文档节点。
+ * @throws 语法无法被处理器承载时失败，禁止静默丢弃内容。
  */
 export function parseMarkdown(source: string): PmNode {
-  const tree = markdownParser.parse(source);
-  const blocks = tree.children.flatMap((child) => mapBlock(child));
-  const content = blocks.length === 0 ? documentSchema.node("paragraph", null, []) : blocks;
-  return documentSchema.node("doc", null, content);
+  const tree = markdownProcessor.parse(source);
+  const definitions = new Map<string, Definition>();
+  collectDefinitions(tree, definitions);
+  const blocks = tree.children.map((node) => mapBlock(node, definitions));
+  return documentSchema.node("doc", null, blocks.length === 0 ? [paragraph()] : blocks);
 }
 
-function mapBlock(node: RootContent | ListItem["children"][number]): PmNode[] {
+function collectDefinitions(node: Nodes, definitions: Map<string, Definition>): void {
+  if (node.type === "definition" && !definitions.has(node.identifier)) {
+    definitions.set(node.identifier, node);
+  }
+  if ("children" in node) {
+    for (const child of node.children) collectDefinitions(child, definitions);
+  }
+}
+
+function paragraph(content: PmNode[] = []): PmNode {
+  return documentSchema.node("paragraph", null, content);
+}
+
+function mapBlock(node: RootContent, definitions: Definitions): PmNode {
   switch (node.type) {
     case "heading":
-      return [mapHeading(node)];
+      return documentSchema.node(
+        "heading",
+        { level: node.depth },
+        mapPhrasing(node.children, definitions),
+      );
     case "paragraph":
-      return [documentSchema.node("paragraph", null, mapPhrasing(node.children))];
+      return paragraph(mapPhrasing(node.children, definitions));
     case "blockquote": {
-      const inner = node.children.flatMap((child) => mapBlock(child));
-      const content = inner.length === 0 ? [documentSchema.node("paragraph", null, [])] : inner;
-      return [documentSchema.node("blockquote", null, content)];
+      const children = node.children.map((child) => mapBlock(child, definitions));
+      return documentSchema.node(
+        "blockquote",
+        null,
+        children.length === 0 ? [paragraph()] : children,
+      );
     }
-    case "list":
-      return [mapList(node)];
+    case "list": {
+      const items = node.children.map((item) => {
+        const children = item.children.map((child) => mapBlock(child, definitions));
+        // list_item 必须以段落开始，空首项与以子列表开头的项也遵循相同约束。
+        if (children[0]?.type.name !== "paragraph") children.unshift(paragraph());
+        return documentSchema.node(
+          "list_item",
+          {
+            checked: item.checked ?? null,
+            spread: item.spread ?? false,
+          },
+          children,
+        );
+      });
+      return documentSchema.node(
+        node.ordered ? "ordered_list" : "bullet_list",
+        {
+          order: node.start ?? 1,
+          spread: node.spread ?? false,
+        },
+        items,
+      );
+    }
     case "code":
-      return [
-        documentSchema.node(
-          "code_block",
-          { params: node.lang ?? "" },
-          node.value === "" ? [] : [documentSchema.text(node.value)],
-        ),
-      ];
+      return documentSchema.node(
+        "code_block",
+        { params: node.lang ?? "", meta: node.meta ?? null },
+        text(node.value),
+      );
     case "thematicBreak":
-      return [documentSchema.node("horizontal_rule")];
+      return documentSchema.node("horizontal_rule");
+    case "html":
+      return documentSchema.node("html_block", { html: node.value });
+    case "math":
+      return documentSchema.node("math_block", { tex: node.value });
+    case "table":
+      return documentSchema.node(
+        "table",
+        null,
+        node.children.map((row, rowIndex) =>
+          documentSchema.node(
+            "table_row",
+            null,
+            row.children.map((cell, colIndex) =>
+              documentSchema.node(
+                rowIndex === 0 ? "table_header" : "table_cell",
+                {
+                  align: node.align?.[colIndex] ?? null,
+                },
+                mapPhrasing(cell.children, definitions),
+              ),
+            ),
+          ),
+        ),
+      );
     default:
-      if (node.type === "html" && hasStringValue(node)) {
-        return [documentSchema.node("html_block", { html: node.value })];
-      }
-      if (node.type === "table" && isTable(node)) {
-        return [mapTable(node)];
-      }
-      // remark-math 的块级节点不在 mdast 默认联合里，只能在这里接住。
-      if (node.type === "math" && hasStringValue(node)) {
-        return [documentSchema.node("math_block", { tex: node.value.trim() })];
-      }
-      return [];
+      return sourceNode(node, true);
   }
 }
 
-function mapHeading(node: Heading): PmNode {
-  const level = Math.min(6, Math.max(1, node.depth));
-  return documentSchema.node("heading", { level }, mapPhrasing(node.children));
-}
-
-function mapList(node: List): PmNode {
-  const items = node.children.map((item) => mapListItem(item));
-  if (node.ordered === true) {
-    return documentSchema.node("ordered_list", { order: node.start ?? 1 }, items);
-  }
-  return documentSchema.node("bullet_list", null, items);
-}
-
-function mapListItem(node: ListItem): PmNode {
-  const mapped = node.children.flatMap((child) => mapBlock(child));
-  // schema 要求 list_item 以 paragraph 开头；子列表/代码块若排第一位会抛错，编辑器整篇空白。
-  const content =
-    mapped[0]?.type.name === "paragraph"
-      ? mapped
-      : [documentSchema.node("paragraph", null, []), ...mapped];
-  const checked = node.checked === true || node.checked === false ? node.checked : null;
-  return documentSchema.node("list_item", { checked }, content);
-}
-
-function mapPhrasing(nodes: PhrasingContent[], markTypes: string[] = []): PmNode[] {
+function mapPhrasing(
+  nodes: PhrasingContent[],
+  definitions: Definitions,
+  marks: readonly Mark[] = [],
+): PmNode[] {
   const out: PmNode[] = [];
-  let index = 0;
-  while (index < nodes.length) {
-    const wiki = tryWikiSequence(nodes, index);
-    if (wiki !== null) {
-      out.push(...wiki.nodes);
-      index = wiki.nextIndex;
-      continue;
-    }
-    const html = tryHtmlRun(nodes, index);
-    if (html !== null) {
-      out.push(html.node);
-      index = html.nextIndex;
-      continue;
-    }
+  for (let index = 0; index < nodes.length; index += 1) {
     const node = nodes[index];
-    if (node === undefined) {
-      break;
+    if (node === undefined) continue;
+    if (node.type === "html") {
+      let html = node.value;
+      let next = nodes[index + 1];
+      // 相邻开闭标签必须一起预览，否则空锚点等 HTML 会被拆坏。
+      while (next?.type === "html") {
+        html += next.value;
+        index += 1;
+        next = nodes[index + 1];
+      }
+      out.push(documentSchema.node("html_inline", { html }).mark(marks));
+    } else {
+      out.push(...mapPhrase(node, definitions, marks));
     }
-    out.push(...mapPhrase(node, markTypes));
-    index += 1;
   }
   return out;
 }
 
-/**
- * micromark 把 `<a id="x"></a>` 拆成开标签和闭标签两个 html 节点。
- * 相邻 html 词元必须拼回一条，否则 NodeView 无法画出完整元素。
- */
-function tryHtmlRun(
-  nodes: PhrasingContent[],
-  index: number,
-): { node: PmNode; nextIndex: number } | null {
-  const first = nodes[index];
-  if (first === undefined || first.type !== "html" || !hasStringValue(first)) {
-    return null;
-  }
-  let html = first.value;
-  let nextIndex = index + 1;
-  while (nextIndex < nodes.length) {
-    const next = nodes[nextIndex];
-    if (next === undefined || next.type !== "html" || !hasStringValue(next)) {
-      break;
-    }
-    html += next.value;
-    nextIndex += 1;
-  }
-  return { node: documentSchema.node("html_inline", { html }), nextIndex };
-}
-
-function tryWikiSequence(
-  nodes: PhrasingContent[],
-  index: number,
-): { nodes: PmNode[]; nextIndex: number } | null {
-  const lead = nodes[index];
-  const ref = nodes[index + 1];
-  const trail = nodes[index + 2];
-  if (lead === undefined || ref === undefined || trail === undefined) {
-    return null;
-  }
-  if (lead.type !== "text" || ref.type !== "linkReference" || trail.type !== "text") {
-    return null;
-  }
-  if (!lead.value.endsWith("[") || !trail.value.startsWith("]")) {
-    return null;
-  }
-  const inner = linkReferenceInner(ref);
-  const target = wikiTarget(inner);
-  let prefix = lead.value.slice(0, -1);
-  const embed = prefix.endsWith("!") && isImageFileName(target);
-  if (embed) {
-    prefix = prefix.slice(0, -1);
-  }
-  const suffix = trail.value.slice(1);
-  const pieces: PmNode[] = [];
-  if (prefix !== "") {
-    pieces.push(...splitWikiText(prefix, []));
-  }
-  const wiki = wikiOrImageFromInner(inner, embed);
-  if (wiki !== null) {
-    pieces.push(wiki);
-  }
-  if (suffix !== "") {
-    pieces.push(...splitWikiText(suffix, []));
-  }
-  return { nodes: pieces, nextIndex: index + 3 };
-}
-
-function linkReferenceInner(node: LinkReference): string {
-  if (node.children.length > 0) {
-    return node.children.map((child) => (child.type === "text" ? child.value : "")).join("");
-  }
-  return node.label ?? node.identifier;
-}
-
-function wikiTarget(inner: string): string {
-  const [targetRaw] = inner.split("|", 2);
-  return (targetRaw ?? "").trim();
-}
-
-function wikiOrImageFromInner(inner: string, embed: boolean): PmNode | null {
-  const [targetRaw, aliasRaw] = inner.split("|", 2);
-  const target = (targetRaw ?? "").trim();
-  if (target === "") {
-    return null;
-  }
-  const alias = aliasRaw === undefined ? null : aliasRaw;
-  if (embed && isImageFileName(target)) {
-    return documentSchema.node("image", {
-      src: target,
-      alt: alias ?? "",
-      title: null,
-      kind: "wiki",
-    });
-  }
-  return documentSchema.node("wiki_link", { target, alias });
-}
-
-function mapPhrase(node: PhrasingContent, markTypes: string[]): PmNode[] {
+function mapPhrase(
+  node: PhrasingContent,
+  definitions: Definitions,
+  marks: readonly Mark[],
+): PmNode[] {
   switch (node.type) {
     case "text":
-      return splitWikiText(node.value, markTypes);
+      return text(node.value, marks);
     case "strong":
-      return mapPhrasing(node.children, [...markTypes, "strong"]);
     case "emphasis":
-      return mapPhrasing(node.children, [...markTypes, "em"]);
+    case "delete": {
+      const name = node.type === "strong" ? "strong" : node.type === "emphasis" ? "em" : "strike";
+      return mapPhrasing(node.children, definitions, [...marks, documentSchema.mark(name)]);
+    }
     case "inlineCode":
-      return wrapText(node.value, [...markTypes, "code"]);
+      return text(node.value, [...marks, documentSchema.mark("code")]);
     case "break":
-      return [documentSchema.node("hard_break")];
+      return [documentSchema.node("hard_break").mark(marks)];
     case "link":
-      return mapLink(node, markTypes);
-    case "delete":
-      return mapPhrasing(node.children, [...markTypes, "strike"]);
+    case "linkReference": {
+      const definition = node.type === "linkReference" ? definitions.get(node.identifier) : node;
+      if (definition === undefined) return [sourceNode(node, false).mark(marks)];
+      const link = documentSchema.mark("link", {
+        href: definition.url,
+        title: definition.title ?? null,
+        reference: node.type === "linkReference" ? node.identifier : null,
+      });
+      return mapPhrasing(node.children, definitions, [...marks, link]);
+    }
     case "image":
+    case "imageReference": {
+      const definition = node.type === "imageReference" ? definitions.get(node.identifier) : node;
+      if (definition === undefined) return [sourceNode(node, false).mark(marks)];
       return [
-        markAtom(
-          documentSchema.node("image", {
-            src: node.url,
+        documentSchema
+          .node(previewKindFromReference(definition.url) ?? "image", {
+            src: definition.url,
             alt: node.alt ?? "",
-            title: node.title ?? null,
+            title: definition.title ?? null,
             kind: "md",
-          }),
-          markTypes,
-        ),
+            reference: node.type === "imageReference" ? node.identifier : null,
+          })
+          .mark(marks),
       ];
-    case "linkReference":
-      return node.children.flatMap((child) => mapPhrase(child, markTypes));
+    }
+    case "wikiLink":
+      return wikiNodes(node.value, marks);
+    case "inlineMath":
+      return [documentSchema.node("math_inline", { tex: node.value }).mark(marks)];
     default:
-      if (node.type === "html" && hasStringValue(node)) {
-        return [documentSchema.node("html_inline", { html: node.value })];
-      }
-      // 行内 math 同样不在默认 PhrasingContent 联合里。
-      if (node.type === "inlineMath" && hasStringValue(node)) {
-        return [documentSchema.node("math_inline", { tex: node.value.trim() })];
-      }
-      return phrasingFallback(node, markTypes);
+      return [sourceNode(node, false).mark(marks)];
   }
 }
 
-function phrasingFallback(node: PhrasingContent, markTypes: string[]): PmNode[] {
-  if (hasPhrasingChildren(node)) {
-    return node.children.flatMap((child) => mapPhrase(child, markTypes));
+function wikiNodes(raw: string, marks: readonly Mark[]): PmNode[] {
+  const embed = raw.startsWith("!");
+  const inner = decodeString(raw.slice(embed ? 3 : 2, -2));
+  const separator = inner.indexOf("|");
+  const target = (separator < 0 ? inner : inner.slice(0, separator)).trim();
+  const alias = separator < 0 ? null : inner.slice(separator + 1);
+  if (target === "") return text(raw, marks);
+  const previewKind = embed ? previewKindFromReference(target) : null;
+  if (previewKind !== null) {
+    return [
+      documentSchema
+        .node(previewKind, {
+          src: target,
+          alt: alias ?? "",
+          kind: "wiki",
+        })
+        .mark(marks),
+    ];
   }
-  if (hasStringValue(node) && node.value !== "") {
-    return wrapText(node.value, markTypes);
-  }
-  return [];
+  const link = documentSchema.node("wiki_link", { target, alias }).mark(marks);
+  return embed ? [...text("!", marks), link] : [link];
 }
 
-function hasPhrasingChildren(
-  node: PhrasingContent,
-): node is PhrasingContent & { children: PhrasingContent[] } {
-  return "children" in node && Array.isArray(node.children);
+function text(value: string, marks: readonly Mark[] = []): PmNode[] {
+  return value === "" ? [] : [documentSchema.text(value, marks)];
 }
 
-function hasStringValue(node: object): node is { value: string } {
-  return "value" in node && typeof node.value === "string";
-}
-
-function mapLink(node: Link, markTypes: string[]): PmNode[] {
-  const href = node.url;
-  const mark = documentSchema.mark("link", { href, title: node.title ?? null });
-  const inner = mapPhrasing(node.children, markTypes);
-  return inner.map((child) => child.mark(child.marks.concat(mark)));
-}
-
-function splitWikiText(text: string, markTypes: string[]): PmNode[] {
-  const out: PmNode[] = [];
-  wikiPattern.lastIndex = 0;
-  let last = 0;
-  let match = wikiPattern.exec(text);
-  while (match !== null) {
-    const inner = match[1] ?? "";
-    const target = wikiTarget(inner);
-    let from = match.index;
-    const embed = from > last && text[from - 1] === "!" && isImageFileName(target);
-    if (embed) {
-      from -= 1;
-    }
-    if (from > last) {
-      out.push(...wrapText(text.slice(last, from), markTypes));
-    }
-    const wiki = wikiOrImageFromInner(inner, embed);
-    if (wiki !== null) {
-      out.push(markAtom(wiki, markTypes));
-    }
-    last = match.index + match[0].length;
-    match = wikiPattern.exec(text);
-  }
-  if (last < text.length) {
-    out.push(...wrapText(text.slice(last), markTypes));
-  }
-  return out;
-}
-
-function wrapText(value: string, markTypes: string[]): PmNode[] {
-  if (value === "") {
-    return [];
-  }
-  const marks = markTypes.map((name) => documentSchema.mark(name));
-  return [documentSchema.text(value, marks)];
-}
-
-function markAtom(node: PmNode, markTypes: string[]): PmNode {
-  if (markTypes.length === 0) {
-    return node;
-  }
-  return node.mark(markTypes.map((name) => documentSchema.mark(name)));
-}
-
-type TableCellLike = { children: PhrasingContent[] };
-type TableRowLike = { children: TableCellLike[] };
-type TableLike = {
-  align?: (string | null)[] | null;
-  children: TableRowLike[];
-};
-
-function isTable(node: object): node is TableLike {
-  return "children" in node && Array.isArray((node as TableLike).children);
-}
-
-function mapTable(node: TableLike): PmNode {
-  const align = node.align ?? [];
-  const rows = node.children.map((row, rowIndex) => {
-    const type = rowIndex === 0 ? "table_header" : "table_cell";
-    const cells = row.children.map((cell, colIndex) => {
-      const cellAlign = align[colIndex] ?? null;
-      return documentSchema.node(type, { align: cellAlign }, mapPhrasing(cell.children));
-    });
-    const content = cells.length === 0 ? [documentSchema.node(type, { align: null }, [])] : cells;
-    return documentSchema.node("table_row", null, content);
-  });
-  const content =
-    rows.length === 0
-      ? [
-          documentSchema.node("table_row", null, [
-            documentSchema.node("table_header", { align: null }, []),
-          ]),
-        ]
-      : rows;
-  return documentSchema.node("table", null, content);
+function sourceNode(node: RootContent, block: boolean): PmNode {
+  // 处理器去除外层引用/列表的缩进；保存时由实际父节点重新施加，避免重复前缀。
+  const source = markdownProcessor.stringify({ type: "root", children: [node] }).trimEnd();
+  return block
+    ? documentSchema.node("markdown_block", null, text(source))
+    : documentSchema.node("markdown_inline", { source });
 }

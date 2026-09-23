@@ -1,7 +1,7 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import {
   DEFAULT_LEFT_WIDTH,
   DEFAULT_RIGHT_WIDTH,
@@ -12,6 +12,12 @@ import {
   patchSession,
   serializeSession,
 } from "../../../apps/desktop/src/main/session";
+
+function temporaryDirectory(): string {
+  const dir = mkdtempSync(join(tmpdir(), "nous-session-"));
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
 
 describe("desktop session", () => {
   it("parses a complete session object", () => {
@@ -86,7 +92,7 @@ describe("desktop session", () => {
   });
 
   it("roundtrips through a session file and patches fields", () => {
-    const dir = mkdtempSync(join(tmpdir(), "nous-session-"));
+    const dir = temporaryDirectory();
     const file = join(dir, "session.json");
     writeFileSync(file, serializeSession(emptySession));
     expect(loadSession(file).vaultRoot).toBeNull();
@@ -98,7 +104,7 @@ describe("desktop session", () => {
   });
 
   it("returns empty session when the file is missing", () => {
-    const dir = mkdtempSync(join(tmpdir(), "nous-session-"));
+    const dir = temporaryDirectory();
     expect(loadSession(join(dir, "missing.json"))).toEqual(emptySession);
   });
 
@@ -127,7 +133,7 @@ describe("desktop session", () => {
   });
 
   it("patching panes leaves vaultRoot and currentPath untouched", () => {
-    const dir = mkdtempSync(join(tmpdir(), "nous-session-"));
+    const dir = temporaryDirectory();
     const file = join(dir, "session.json");
     writeFileSync(
       file,

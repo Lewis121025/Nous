@@ -1,15 +1,16 @@
 import { join } from "node:path";
-import { BrowserWindow, app, screen } from "electron";
+import { Worker } from "node:worker_threads";
+import { BrowserWindow, app, dialog, screen } from "electron";
 import { createCloseGate, onCloseAttempt, resetCloseGate, type CloseGate } from "./close-gate";
+import { CoreClient } from "./core-client";
 import { registerIpc } from "./ipc";
-import { loadSession, patchSession, sessionFile, type WindowSession } from "./session";
+import type { WindowSession } from "./session";
 
 let mainWindow: BrowserWindow | null = null;
 const closeGate: CloseGate = createCloseGate();
-
-function sessionPath(): string {
-  return sessionFile(app.getPath("userData"));
-}
+let core: CoreClient | null = null;
+let storedWindow: WindowSession | null = null;
+let quitState: "running" | "stopping" | "stopped" = "running";
 
 /**
  * 把记下的窗口放到当前仍存在的显示器上，避免外接屏拔掉后开到屏外。
@@ -41,17 +42,13 @@ function rendererCanFlush(win: BrowserWindow | null): boolean {
   return win !== null && !win.webContents.isDestroyed() && !win.webContents.isLoadingMainFrame();
 }
 
-function persistWindow(win: BrowserWindow): void {
+function persistWindow(win: BrowserWindow, client: CoreClient): void {
   const maximized = win.isMaximized();
   const bounds = maximized ? win.getNormalBounds() : win.getBounds();
-  patchSession(sessionPath(), {
-    window: {
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-      maximized,
-    },
+  storedWindow = { ...bounds, maximized };
+  // 同步入队，退出时由 shutdown 等待写完；macOS 再开窗口直接使用内存中的几何。
+  void client.call("sessionPatch", { window: storedWindow }).catch((error: unknown) => {
+    console.error("保存窗口状态失败", error);
   });
 }
 
@@ -60,8 +57,8 @@ function persistWindow(win: BrowserWindow): void {
  *
  * 渲染进程无 Node、无直接磁盘访问；仅通过 preload 暴露的 IPC 与内核通信。
  */
-function createWindow(): void {
-  const stored = loadSession(sessionPath()).window;
+function createWindow(client: CoreClient): void {
+  const stored = storedWindow;
   const bounds = stored === null ? null : clampWindow(stored);
   mainWindow = new BrowserWindow({
     ...(bounds ?? { width: 1100, height: 720 }),
@@ -88,7 +85,7 @@ function createWindow(): void {
   resetCloseGate(closeGate);
   mainWindow.on("close", (event) => {
     if (mainWindow !== null) {
-      persistWindow(mainWindow);
+      persistWindow(mainWindow, client);
     }
     const action = onCloseAttempt(closeGate, {
       asQuit: false,
@@ -107,12 +104,29 @@ function createWindow(): void {
   });
 }
 
-app.whenReady().then(() => {
-  registerIpc(() => mainWindow, closeGate);
-  createWindow();
+app.whenReady().then(async () => {
+  const client = new CoreClient(
+    new Worker(new URL("./core-worker.js", import.meta.url), {
+      workerData: app.getPath("userData"),
+    }),
+    () => {
+      if (mainWindow !== null && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send("vault.changed");
+      }
+    },
+  );
+  core = client;
+  registerIpc(() => mainWindow, closeGate, client);
+  try {
+    storedWindow = (await client.call("sessionLoad")).window;
+  } catch (error) {
+    console.error("恢复窗口状态失败", error);
+  }
+  if (quitState !== "running") return;
+  createWindow(client);
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+    if (quitState === "running" && BrowserWindow.getAllWindows().length === 0) {
+      createWindow(client);
     }
   });
 });
@@ -135,4 +149,20 @@ app.on("before-quit", (event) => {
   if (action === "prevent-and-send") {
     mainWindow?.webContents.send("app.flushBeforeClose");
   }
+});
+
+app.on("will-quit", (event) => {
+  if (core === null || quitState === "stopped") return;
+  event.preventDefault();
+  if (quitState === "stopping") return;
+  quitState = "stopping";
+  void core
+    .shutdown()
+    .catch((error: unknown) => {
+      dialog.showErrorBox("内核未正常关闭", error instanceof Error ? error.message : String(error));
+    })
+    .finally(() => {
+      quitState = "stopped";
+      app.quit();
+    });
 });

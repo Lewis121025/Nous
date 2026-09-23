@@ -5,7 +5,7 @@
 pub enum LinkKind {
     /// `[[target]]` 或 `[[target|alias]]`。
     Wiki,
-    /// `[text](url)` 内部相对链接。
+    /// Markdown 内联地址或引用定义，包含图片目标。
     Markdown,
 }
 

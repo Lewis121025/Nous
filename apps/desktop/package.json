@@ -10,7 +10,10 @@
     "preview": "electron-vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.web.json && tsc -p tsconfig.node.json --noEmit",
     "lint": "eslint src --max-warnings 0 && prettier --check src",
-    "test": "vitest run --config vitest.config.ts"
+    "test": "vitest run --config vitest.config.ts",
+    "test:core": "vitest run --config vitest.core.config.ts",
+    "test:preview": "vitest run --config vitest.preview.config.ts",
+    "test:performance": "vitest run --config vitest.performance.config.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
@@ -28,7 +31,8 @@
     "svelte-eslint-parser": "^1.3.1",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.44.0",
-    "vite": "^7.1.5"
+    "vite": "^7.1.5",
+    "vite-plugin-static-copy": "^4.1.1"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.1",
@@ -48,7 +52,11 @@
     "@nous/native": "workspace:*",
     "@types/mdast": "^4.0.4",
     "dompurify": "^3.4.15",
+    "mdast-util-from-markdown": "^2.0.3",
     "mdast-util-to-string": "^4.0.0",
+    "micromark-util-decode-string": "^2.0.1",
+    "micromark-util-types": "^2.0.2",
+    "pdfjs-dist": "^6.3.289",
     "prosemirror-commands": "^1.7.2",
     "prosemirror-history": "^1.5.0",
     "prosemirror-inputrules": "^1.5.1",
@@ -57,9 +65,11 @@
     "prosemirror-schema-list": "^1.5.1",
     "prosemirror-state": "^1.4.4",
     "prosemirror-view": "^1.42.4",
+    "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
     "remark-parse": "^11.0.0",
+    "remark-stringify": "^11.0.0",
     "unified": "^11.0.5"
   }
 }

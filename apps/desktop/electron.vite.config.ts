@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import type { Plugin } from "vite";
+import { viteStaticCopy } from "vite-plugin-static-copy";
 
 const mathjaxWoffDir = resolve("node_modules/@mathjax/mathjax-newcm-font/chtml/woff2");
 const mathjaxWoffPublic = "mathjax-fonts/woff2";
@@ -57,6 +58,14 @@ function mathjaxWoffPlugin(): Plugin {
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve("src/main/index.ts"),
+          "core-worker": resolve("src/main/core-worker.ts"),
+        },
+      },
+    },
     resolve: {
       external: ["@nous/native"],
     },
@@ -81,6 +90,16 @@ export default defineConfig({
         "#default-font": resolve("node_modules/@mathjax/mathjax-newcm-font/mjs"),
       },
     },
-    plugins: [svelte(), mathjaxWoffPlugin()],
+    plugins: [
+      svelte(),
+      mathjaxWoffPlugin(),
+      // PDF 的 CJK 字形映射、标准字体和解码器在开发与离线构建中使用同一目录。
+      viteStaticCopy({
+        targets: ["cmaps", "standard_fonts", "wasm", "iccs"].map((directory) => ({
+          src: resolve(`node_modules/pdfjs-dist/${directory}`),
+          dest: "pdfjs",
+        })),
+      }),
+    ],
   },
 });

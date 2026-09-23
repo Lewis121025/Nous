@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import { describe, expect, it } from "vitest";
 import {
-  isImageFileName,
+  previewKindFromReference,
   isRemoteMediaSrc,
   mimeFromPath,
   resolveMediaUrl,
@@ -11,10 +11,11 @@ import {
 
 describe("media helpers", () => {
   it("recognizes wiki image filenames and remote urls", () => {
-    expect(isImageFileName("shot.jpg")).toBe(true);
-    expect(isImageFileName("shot.jpg#crop")).toBe(true);
-    expect(isImageFileName("folder/a.PNG")).toBe(true);
-    expect(isImageFileName("Other")).toBe(false);
+    expect(previewKindFromReference("shot.jpg")).toBe("image");
+    expect(previewKindFromReference("shot.jpg#crop")).toBe("image");
+    expect(previewKindFromReference("folder/a.PNG")).toBe("image");
+    expect(previewKindFromReference("paper.PDF?page=1#section")).toBe("pdf");
+    expect(previewKindFromReference("Other")).toBeNull();
     expect(isRemoteMediaSrc("https://ex.test/a.png")).toBe(true);
     expect(isRemoteMediaSrc("data:image/png;base64,xx")).toBe(true);
     expect(isRemoteMediaSrc("./a.png")).toBe(false);
@@ -69,6 +70,18 @@ describe("media helpers", () => {
 });
 
 describe("html img rewrite", () => {
+  it("isolates a rejected image load so the remaining images still render", async () => {
+    const root = document.createElement("div");
+    root.innerHTML = '<img src="missing.png"><img src="available.png">';
+    await rewriteMediaSrcs(root, async (src) => {
+      if (src === "missing.png") throw new Error("文件读取失败");
+      return "blob:available";
+    });
+    const images = root.querySelectorAll("img");
+    expect(images[0]?.hasAttribute("src")).toBe(false);
+    expect(images[1]?.getAttribute("src")).toBe("blob:available");
+  });
+
   it("rewrites relative img src and leaves remote src", async () => {
     const root = document.createElement("div");
     root.innerHTML = '<img src="./x.png"><img src="https://ex.test/a.png">';

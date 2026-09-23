@@ -13,5 +13,17 @@
     "noEmit": true,
     "types": ["electron-vite/node"]
   },
-  "include": ["electron.vite.config.ts", "src/main/**/*.ts", "src/preload/**/*.ts", "src/shared/**/*.ts"]
+  "include": [
+    "electron.vite.config.ts",
+    "vitest.core.config.ts",
+    "vitest.preview.config.ts",
+    "vitest.performance.config.ts",
+    "src/main/**/*.ts",
+    "src/preload/**/*.ts",
+    "src/shared/**/*.ts",
+    "../../tests/desktop/unit/core-protocol.types.ts",
+    "../../tests/desktop/integration/core-native.test.mts",
+    "../../tests/desktop/e2e/attachments.test.mts",
+    "../../tests/desktop/performance/reading.test.mts"
+  ]
 }

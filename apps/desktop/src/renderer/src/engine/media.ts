@@ -12,16 +12,16 @@ export type MediaIo = {
   createUrl: (bytes: Uint8Array, mime: string) => string;
 };
 
-const IMAGE_EXT = /\.(?:png|jpe?g|gif|webp|svg|avif|bmp)$/i;
-
 /**
- * 判断 wiki 目标是否按图片嵌入，而不是普通链接。
- *
- * @param src wiki target 或路径，可带 query/hash。
+ * 按链接目标选择嵌入预览；真实磁盘路径应直接使用 mimeFromPath。
+ * @param src Markdown 或 Wiki 引用，可带查询参数和片段。
+ * @returns 可预览的嵌入类型；其他目标返回 null。
  */
-export function isImageFileName(src: string): boolean {
+export function previewKindFromReference(src: string): "image" | "pdf" | null {
   const path = src.split(/[?#]/, 1)[0] ?? src;
-  return IMAGE_EXT.test(path);
+  const mime = mimeFromPath(path);
+  if (mime.startsWith("image/")) return "image";
+  return mime === "application/pdf" ? "pdf" : null;
 }
 
 /**
@@ -34,9 +34,9 @@ export function isRemoteMediaSrc(src: string): boolean {
 }
 
 /**
- * 由库内路径猜 MIME，给 blob 用。
- *
+ * 由真实文件扩展名选择 MIME，不将文件名里的 #、? 解释成 URL 后缀。
  * @param path 库内相对路径。
+ * @returns 已支持的 MIME；其他类型返回 application/octet-stream。
  */
 export function mimeFromPath(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase();
@@ -56,6 +56,8 @@ export function mimeFromPath(path: string): string {
       return "image/avif";
     case "bmp":
       return "image/bmp";
+    case "pdf":
+      return "application/pdf";
     default:
       return "application/octet-stream";
   }
@@ -114,6 +116,7 @@ export const browserMediaIo: MediaIo = {
  *
  * @param root 已挂到页面的消毒 DOM。
  * @param load 相对 src → 可加载 URL。
+ * @returns 全部图片处理完毕；单张图片读取失败时清空地址，继续处理其余图片。
  */
 export async function rewriteMediaSrcs(
   root: ParentNode,
@@ -125,7 +128,12 @@ export async function rewriteMediaSrcs(
     if (src === "" || isRemoteMediaSrc(src)) {
       continue;
     }
-    const url = await load(src);
+    let url: string | null;
+    try {
+      url = await load(src);
+    } catch {
+      url = null;
+    }
     if (url === null) {
       img.removeAttribute("src");
       continue;

@@ -6,6 +6,8 @@
   import BacklinksPane from "./BacklinksPane.svelte";
   import CodeEditor from "./CodeEditor.svelte";
   import DocumentEditor from "./DocumentEditor.svelte";
+  import ImagePreview from "./ImagePreview.svelte";
+  import PdfPreview from "./PdfPreview.svelte";
   import OutlineTree from "./OutlineTree.svelte";
   import RightSidebar from "./RightSidebar.svelte";
   import Sidebar from "./Sidebar.svelte";
@@ -13,16 +15,17 @@
   import { createAutosave } from "./engine/autosave";
   import { mentionOccurrenceIndex } from "./engine/backlinks";
   import { buildOutlineTree, outlineEquals, type OutlineItem } from "./engine/outline";
-  import { shouldApplyReload } from "./engine/reload";
+  import { bytesEqual } from "./engine/reload";
   import { bytesForSave, commitSuccessfulWrite } from "./engine/save";
   import type { MentionRecord, Mentions, SidebarSlot, SidebarViewId } from "../../shared/api";
   import { SIDEBAR_LAYOUT } from "../../shared/api";
   import { EMPTY_MENTIONS, commitMentionsRefresh } from "./engine/mentions-refresh";
+  import { readFileContent, type FileContent } from "./engine/file-content";
 
   let files = $state<string[]>([]);
   let current = $state<string | null>(null);
   let originalBytes = $state<Uint8Array | null>(null);
-  let source = $state("");
+  let content = $state.raw<FileContent | null>(null);
   let dirty = $state(false);
   let followMentions = $state<Mentions>(EMPTY_MENTIONS);
   let mentionCache = $state<Record<string, Mentions>>({});
@@ -41,14 +44,36 @@
   let backlinksInDocument = $state(false);
   let pendingJump = $state<MentionRecord | null>(null);
   let pendingJumpAll = $state<MentionRecord[]>([]);
+  let conflict = $state<{ disk: Uint8Array | null } | null>(null);
+  let saveError = $state<string | null>(null);
+  let saving = $state(false);
+  let copying = $state(false);
+  let switching = $state(true);
 
   let markdownApi: MarkdownEditorApi | null = null;
   let codeApi: CodeEditorApi | null = null;
 
   const decoder = new TextDecoder();
   let editGen = 0;
+  // 路径相同也可能已换库或重载，异步结果必须属于同一次文档加载。
+  let documentEpoch = $state(0);
+  let refreshEpoch = 0;
+  let pendingRefresh = false;
   const outlineTree = $derived(buildOutlineTree(outline));
   const collapsedKeys = $derived(current === null ? [] : (collapsedByFile[current] ?? []));
+  const saveStatus = $derived(
+    copying
+      ? "正在保存副本…"
+      : saving
+        ? "正在保存…"
+        : conflict !== null
+          ? "存在保存冲突"
+          : saveError !== null
+            ? "保存失败"
+            : dirty
+              ? "未保存"
+              : "已保存",
+  );
 
   const autosave = createAutosave({
     isDirty: () => dirty,
@@ -73,16 +98,8 @@
     };
   });
 
-  /**
-   * 是否走文档表面。
-   *
-   * @param path 库内相对路径。
-   */
-  function isMarkdown(path: string): boolean {
-    return path.toLowerCase().endsWith(".md");
-  }
-
-  const canOutline = $derived(current !== null && isMarkdown(current));
+  const canEdit = $derived(content?.kind === "markdown" || content?.kind === "text");
+  const canOutline = $derived(content?.kind === "markdown");
 
   function basename(path: string): string {
     const slash = path.lastIndexOf("/");
@@ -95,10 +112,16 @@
   }
 
   async function refreshList(): Promise<void> {
-    files = await window.nous.vaultList();
+    const root = vaultRoot;
+    const epoch = documentEpoch;
+    const listed = await window.nous.vaultList();
+    if (root === vaultRoot && epoch === documentEpoch) {
+      files = listed;
+    }
   }
 
   async function refreshMentions(): Promise<void> {
+    const epoch = documentEpoch;
     const gen = mentionGen + 1;
     mentionGen = gen;
     const paths: string[] = [];
@@ -116,12 +139,13 @@
         next[path] = await window.nous.indexMentionsTo(path);
       }
     } catch (err) {
-      if (gen !== mentionGen) {
+      if (gen !== mentionGen || epoch !== documentEpoch) {
         return;
       }
-      message = err instanceof Error ? err.message : "入链刷新失败";
+      if (message === "") message = `入链刷新失败：${errorText(err)}`;
       return;
     }
+    if (epoch !== documentEpoch) return;
     const committed = commitMentionsRefresh({
       startedGen: gen,
       latestGen: mentionGen,
@@ -148,48 +172,92 @@
   }
 
   async function onVaultChanged(): Promise<void> {
-    const pathWhenStarted = current;
+    if (switching || copying || saving) {
+      pendingRefresh = true;
+      return;
+    }
+    const path = current;
+    const epoch = documentEpoch;
+    const request = ++refreshEpoch;
+    const baseline = originalBytes;
     try {
       await refreshList();
-    } catch {
-      return;
-    }
-    if (current !== pathWhenStarted) {
-      return;
-    }
-    if (current === null) {
-      return;
-    }
-    if (!files.includes(current)) {
-      if (!dirty) {
-        current = null;
-        originalBytes = null;
-        source = "";
-        followMentions = EMPTY_MENTIONS;
-        mentionCache = {};
-        outline = [];
-        void window.nous.sessionSetCurrent(null);
+      if (epoch !== documentEpoch || path === null || switching) return;
+      const snapshot = await window.nous.fileSnapshot(path);
+      if (epoch !== documentEpoch || request !== refreshEpoch) return;
+      if (switching || copying || saving || baseline !== originalBytes) {
+        pendingRefresh = true;
+        resumeVaultRefresh();
+        return;
       }
-      return;
+      if (dirty) {
+        conflict = bytesEqual(snapshot.disk, originalBytes) ? null : { disk: snapshot.disk };
+      } else if (snapshot.disk === null) {
+        clearDocument();
+        await window.nous.sessionSetCurrent(null);
+      } else if (!bytesEqual(snapshot.disk, originalBytes)) {
+        documentEpoch += 1;
+        originalBytes = snapshot.disk;
+        content = readFileContent(path, snapshot.disk);
+      }
+      if (current === path) await refreshMentions();
+    } catch (err) {
+      if (epoch === documentEpoch && !switching) {
+        message = `读取外部变更失败：${errorText(err)}`;
+      }
     }
+  }
+
+  function resumeVaultRefresh(): void {
+    if (!pendingRefresh || switching || copying || saving) return;
+    pendingRefresh = false;
+    void onVaultChanged();
+  }
+
+  function errorText(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  function clearDocument(): void {
+    documentEpoch += 1;
+    current = null;
+    originalBytes = null;
+    content = null;
+    dirty = false;
+    conflict = null;
+    saveError = null;
+    mentionGen += 1;
+    followMentions = EMPTY_MENTIONS;
+    mentionCache = {};
+    pendingJump = null;
+    pendingJumpAll = [];
+    outline = [];
+  }
+
+  async function loadFile(path: string): Promise<void> {
+    const snapshot = await window.nous.fileSnapshot(path);
+    let bytes = snapshot.draft?.bytes ?? snapshot.disk;
+    if (bytes === null) throw new Error("文件已不存在");
+    const baseBytes = snapshot.draft?.base ?? bytes;
+    const baseContent = readFileContent(path, baseBytes);
+    const editable = baseContent.kind === "markdown" || baseContent.kind === "text";
+    // 旧版本可能为二进制误建文本草稿；预览只读取原文件，保留草稿但不写回附件。
+    // 草稿原本是文本时，以编辑基准判断，磁盘变为二进制也不能隐藏用户的有效编辑。
+    if (!editable) bytes = snapshot.disk ?? baseBytes;
+    documentEpoch += 1;
+    originalBytes = editable && snapshot.draft !== null ? snapshot.draft.base : snapshot.disk;
+    content = bytes === baseBytes ? baseContent : readFileContent(path, bytes);
+    current = path;
+    dirty =
+      (content.kind === "markdown" || content.kind === "text") &&
+      editable &&
+      snapshot.draft !== null;
+    conflict = dirty && !bytesEqual(snapshot.disk, originalBytes) ? { disk: snapshot.disk } : null;
+    saveError = null;
+    renameName = basename(path);
+    message = dirty ? "已恢复上次未保存的编辑，请检查后保存。" : "";
+    await window.nous.sessionSetCurrent(path);
     await refreshMentions();
-    if (current !== pathWhenStarted) {
-      return;
-    }
-    const bytes = await window.nous.fileRead(pathWhenStarted);
-    if (
-      !shouldApplyReload({
-        dirty,
-        currentPath: current,
-        pathWhenStarted,
-        original: originalBytes,
-        disk: bytes,
-      })
-    ) {
-      return;
-    }
-    originalBytes = bytes;
-    source = decoder.decode(bytes);
   }
 
   /**
@@ -297,66 +365,55 @@
       vaultRoot = restored.root;
       await refreshList();
       if (restored.currentPath !== null && files.includes(restored.currentPath)) {
-        await openFile(restored.currentPath);
+        await loadFile(restored.currentPath);
         return;
       }
       await window.nous.sessionSetCurrent(null);
     } catch (err) {
       message = err instanceof Error ? err.message : "恢复会话失败";
+    } finally {
+      switching = false;
+      resumeVaultRefresh();
     }
   }
 
   async function openVault(): Promise<void> {
-    await autosave.flush();
-    if (dirty) {
-      if (message === "") {
-        message = "请先保存再打开其他库";
-      }
-      return;
-    }
+    if (switching || copying) return;
+    switching = true;
     try {
+      await autosave.flush();
+      if (dirty) return;
       const root = await window.nous.vaultOpen();
-      if (root === null) {
-        return;
-      }
+      if (root === null) return;
       vaultRoot = root;
-      current = null;
-      originalBytes = null;
-      source = "";
-      dirty = false;
-      followMentions = EMPTY_MENTIONS;
-      mentionCache = {};
+      clearDocument();
       message = "";
-      outline = [];
       await refreshList();
     } catch (err) {
-      message = err instanceof Error ? err.message : "打开库失败";
+      message = `打开库失败：${errorText(err)}`;
+    } finally {
+      switching = false;
+      resumeVaultRefresh();
     }
   }
 
   async function openFile(path: string): Promise<void> {
-    if (path === current) {
-      return;
+    if (path === current || switching || copying) return;
+    switching = true;
+    try {
+      await autosave.flush();
+      if (dirty) return;
+      await loadFile(path);
+    } catch (err) {
+      message = `打开文件失败：${errorText(err)}`;
+    } finally {
+      switching = false;
+      resumeVaultRefresh();
     }
-    await autosave.flush();
-    if (dirty) {
-      if (message === "") {
-        message = "请先保存再打开其他文件";
-      }
-      return;
-    }
-    const bytes = await window.nous.fileRead(path);
-    originalBytes = bytes;
-    source = decoder.decode(bytes);
-    current = path;
-    dirty = false;
-    renameName = basename(path);
-    message = "";
-    await window.nous.sessionSetCurrent(path);
-    await refreshMentions();
   }
 
   function markDirty(): void {
+    if (!canEdit) return;
     dirty = true;
     editGen += 1;
     autosave.touch();
@@ -418,10 +475,12 @@
       return;
     }
     const occurrence = mentionOccurrenceIndex(pendingJumpAll, mention);
-    if (isMarkdown(path)) {
-      markdownApi?.jumpToMention(mention, occurrence);
-    } else {
-      codeApi?.jumpToByte(mention.startByte);
+    if (content?.kind === "markdown") {
+      if (markdownApi === null) return;
+      markdownApi.jumpToMention(mention, occurrence);
+    } else if (content?.kind === "text") {
+      if (codeApi === null) return;
+      codeApi.jumpToByte(mention.startByte);
     }
     pendingJump = null;
     pendingJumpAll = [];
@@ -444,121 +503,164 @@
     }
   }
 
+  function serializeCurrent(): string {
+    if (content?.kind === "markdown") {
+      if (markdownApi === null) throw new Error("文档编辑器尚未就绪");
+      return markdownApi.serialize();
+    }
+    if (content?.kind !== "text" || codeApi === null) throw new Error("文本编辑器尚未就绪");
+    return codeApi.getText();
+  }
+
   async function persist(): Promise<void> {
     const path = current;
     const original = originalBytes;
     const gen = editGen;
-    if (path === null || original === null) {
-      return;
-    }
-    const serialize = (): string => {
-      if (isMarkdown(path)) {
-        if (markdownApi === null) {
-          throw new Error("文档编辑器尚未就绪");
-        }
-        return markdownApi.serialize();
-      }
-      if (codeApi === null) {
-        throw new Error("代码编辑器尚未就绪");
-      }
-      return codeApi.getText();
-    };
+    const epoch = documentEpoch;
+    if (path === null || copying || !canEdit) return;
+    saving = true;
     try {
-      const bytes = bytesForSave(dirty, original, serialize);
-      await window.nous.fileWrite(path, bytes);
-      if (current !== path) {
+      const bytes = bytesForSave(dirty, original ?? new Uint8Array(), serializeCurrent);
+      const result = await window.nous.fileWrite(path, bytes, original);
+      if (epoch !== documentEpoch) return;
+      saveError = null;
+      if (result.status === "conflict") {
+        conflict = { disk: result.disk };
         return;
       }
       const commit = commitSuccessfulWrite(bytes, gen, editGen);
       originalBytes = commit.originalBytes;
       dirty = commit.dirty;
-      message = "";
-      if (current === path) {
-        await refreshMentions();
-      }
+      conflict = null;
+      message = result.warning === null ? "" : `内容已保存。${result.warning}`;
+      await refreshMentions();
     } catch (err) {
-      message = err instanceof Error ? err.message : "保存失败";
+      if (epoch === documentEpoch) saveError = errorText(err);
+    } finally {
+      saving = false;
+      resumeVaultRefresh();
+    }
+  }
+
+  async function saveCopy(): Promise<void> {
+    if (current === null || switching || copying || saving || !canEdit) return;
+    copying = true;
+    autosave.dispose();
+    const path = current;
+    const gen = editGen;
+    let savedPath: string | null = null;
+    try {
+      const bytes = new TextEncoder().encode(serializeCurrent());
+      const copy = await window.nous.fileWriteCopy(path, bytes, originalBytes);
+      savedPath = copy.path;
+      // 等待写盘期间仍可输入；换到副本时必须带上这段更新。
+      const latest = editGen === gen ? bytes : new TextEncoder().encode(serializeCurrent());
+      documentEpoch += 1;
+      current = copy.path;
+      content = readFileContent(copy.path, latest);
+      originalBytes = bytes;
+      dirty = editGen !== gen;
+      conflict = null;
+      saveError = null;
+      renameName = basename(copy.path);
+      message = `副本已保存为 ${copy.path}。${copy.warning ?? "原文件已保留。"}`;
+      await window.nous.sessionSetCurrent(copy.path);
+      await refreshList();
+      await refreshMentions();
+    } catch (err) {
+      if (savedPath === null) saveError = errorText(err);
+      else message = `副本已保存为 ${savedPath}，但界面更新失败：${errorText(err)}`;
+    } finally {
+      copying = false;
+      resumeVaultRefresh();
+      if (dirty) autosave.touch();
     }
   }
 
   async function onFlushBeforeClose(): Promise<void> {
-    await autosave.flush();
-    if (dirty) {
-      if (message === "") {
-        message = "保存失败，请先手动保存再关闭";
-      }
+    if (switching || copying) {
+      message = "请等待当前操作完成后再关闭。";
       await window.nous.closeBlocked();
       return;
     }
-    await window.nous.closeAfterFlush();
+    switching = true;
+    try {
+      await autosave.flush();
+      if (dirty) {
+        if (message === "") message = "当前编辑尚未保存，请处理后再关闭。";
+        await window.nous.closeBlocked();
+        return;
+      }
+      await window.nous.closeAfterFlush();
+    } finally {
+      switching = false;
+      resumeVaultRefresh();
+    }
   }
 
   async function openLink(kind: "wiki" | "md", raw: string): Promise<void> {
-    if (current === null) {
-      return;
-    }
-    await autosave.flush();
-    if (dirty) {
-      if (message === "") {
-        message = "请先保存再跳转";
+    if (current === null || switching || copying) return;
+    const path = current;
+    const epoch = documentEpoch;
+    try {
+      const to = await window.nous.linksResolve(path, raw, kind);
+      if (epoch !== documentEpoch || switching || copying) return;
+      if (to === null) {
+        message = "死链，无法跳转";
+        return;
       }
-      return;
+      await openFile(to);
+    } catch (err) {
+      if (epoch === documentEpoch) message = `打开链接失败：${errorText(err)}`;
     }
-    const to = await window.nous.linksResolve(current, raw, kind);
-    if (to === null) {
-      message = "死链，无法跳转";
-      return;
-    }
-    await openFile(to);
   }
 
   async function rename(): Promise<void> {
-    if (current === null) {
-      return;
-    }
-    await autosave.flush();
-    if (dirty) {
-      if (message === "") {
-        message = "有未保存修改，拒绝改名";
-      }
-      return;
-    }
-    const name = renameName.trim();
-    if (name === "") {
-      message = "文件名不能为空";
-      return;
-    }
-    const to = siblingPath(current, name);
-    if (to === current) {
-      return;
-    }
+    if (current === null || switching || copying) return;
+    switching = true;
+    let renamedPath: string | null = null;
     try {
-      await window.nous.entryRename(current, to);
+      await autosave.flush();
+      if (dirty) return;
+      const name = renameName.trim();
+      if (name === "") {
+        message = "文件名不能为空";
+        return;
+      }
+      const to = siblingPath(current, name);
+      if (to === current) return;
+      const result = await window.nous.entryRename(current, to);
+      renamedPath = to;
       rightSlots = rightSlots.map((slot) =>
         slot.pinnedPath === current ? { ...slot, pinnedPath: to } : slot,
       );
-      current = to;
-      renameName = basename(to);
-      const bytes = await window.nous.fileRead(to);
-      originalBytes = bytes;
-      source = decoder.decode(bytes);
-      dirty = false;
-      await window.nous.sessionSetCurrent(to);
       persistPanes();
+      await loadFile(to);
       await refreshList();
-      await refreshMentions();
-      message = "";
+      if (result.warning !== null) message = `文件已重命名。${result.warning}`;
     } catch (err) {
-      message = err instanceof Error ? err.message : "改名失败";
+      if (renamedPath === null) message = `改名失败：${errorText(err)}`;
+      else {
+        clearDocument();
+        message = `文件已重命名为 ${renamedPath}，但界面更新失败，请重新打开：${errorText(err)}`;
+        await refreshList().catch(() => undefined);
+      }
+    } finally {
+      switching = false;
+      resumeVaultRefresh();
     }
   }
 </script>
 
 <div class="app">
   <header class="toolbar">
-    <button type="button" onclick={() => void openVault()}>打开库</button>
-    <button type="button" onclick={() => void autosave.flush()} disabled={current === null}
-      >保存</button
+    <button type="button" onclick={() => void openVault()} disabled={switching || copying}
+      >打开库</button
+    >
+    <button
+      type="button"
+      onclick={requestSave}
+      disabled={!canEdit || switching || copying || saving}>保存</button
     >
     <button type="button" aria-pressed={!filesCollapsed} onclick={toggleFilesPane}>文件</button>
     <button type="button" aria-pressed={!rightCollapsed} onclick={toggleRightPane}>入链</button>
@@ -571,12 +673,15 @@
     {#if vaultRoot !== null}
       <span class="root" title={vaultRoot}>{vaultRoot}</span>
     {/if}
+    {#if current !== null}
+      <span class="save-status" role="status">{canEdit ? saveStatus : "只读预览"}</span>
+    {/if}
     {#if message !== ""}
       <span class="message">{message}</span>
     {/if}
   </header>
 
-  <div class="panes">
+  <div class="panes" inert={switching}>
     {#if !filesCollapsed}
       <Sidebar
         side="left"
@@ -606,25 +711,64 @@
 
     <section class="main">
       {#if current !== null}
-        {#if isMarkdown(current)}
-          <DocumentEditor
-            path={current}
-            {source}
-            onDirty={markDirty}
-            onSave={requestSave}
-            onOpenLink={requestOpenLink}
-            onOutline={setOutline}
-            register={registerMarkdown}
-          />
-        {:else}
-          <CodeEditor
-            {source}
-            path={current}
-            onDirty={markDirty}
-            onSave={requestSave}
-            register={registerCode}
-          />
+        {#if conflict !== null || saveError !== null}
+          <section class="save-notice" aria-label="保存需要处理">
+            <p role="alert">
+              {#if conflict !== null}
+                {conflict.disk === null ? "原文件已在其他地方删除。" : "原文件已在其他地方修改。"}
+                当前编辑仍保留，可另存副本以保留两份内容。
+              {:else}
+                保存失败。当前编辑仍保留，请重试或另存副本。
+              {/if}
+            </p>
+            {#if saveError !== null}<p class="save-error">{saveError}</p>{/if}
+            <div class="save-actions">
+              <button type="button" onclick={() => void saveCopy()} disabled={saving || copying}
+                >另存为副本</button
+              >
+              <button type="button" onclick={requestSave} disabled={saving || copying}
+                >重试保存</button
+              >
+            </div>
+            {#if conflict?.disk != null}
+              <details>
+                <summary>查看磁盘版本</summary>
+                <pre>{decoder.decode(conflict.disk)}</pre>
+              </details>
+            {/if}
+          </section>
         {/if}
+        {#key documentEpoch}
+          {#if content?.kind === "markdown"}
+            <DocumentEditor
+              path={current}
+              source={content.source}
+              onDirty={markDirty}
+              onSave={requestSave}
+              onOpenLink={requestOpenLink}
+              onOutline={setOutline}
+              register={registerMarkdown}
+            />
+          {:else if content?.kind === "text"}
+            <CodeEditor
+              source={content.source}
+              path={current}
+              onDirty={markDirty}
+              onSave={requestSave}
+              register={registerCode}
+            />
+          {:else if content?.kind === "image"}
+            <ImagePreview path={current} bytes={content.bytes} />
+          {:else if content?.kind === "pdf"}
+            <PdfPreview bytes={content.bytes} />
+          {:else}
+            <section class="unsupported" aria-label="附件预览">
+              <h2>暂不支持预览此文件</h2>
+              <p>{current}</p>
+              <p>可预览图片、PDF 和 UTF-8 文本文件。</p>
+            </section>
+          {/if}
+        {/key}
 
         {#if backlinksInDocument}
           <div class="in-doc">
@@ -735,6 +879,43 @@
     margin-left: auto;
   }
 
+  .save-status {
+    white-space: nowrap;
+    font-size: 0.875rem;
+  }
+
+  .save-notice {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--fg);
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .save-notice p {
+    margin: 0 0 0.75rem;
+  }
+
+  .save-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .save-notice details {
+    margin-top: 0.75rem;
+  }
+
+  .save-notice pre {
+    max-height: 14rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .save-error {
+    font-size: 0.875rem;
+    overflow-wrap: anywhere;
+  }
+
   .panes {
     flex: 1 1 auto;
     min-height: 0;
@@ -792,6 +973,18 @@
     margin-top: 1rem;
     border-top: 1px solid var(--border);
     min-height: 12rem;
+  }
+
+  .unsupported {
+    padding: 3rem 1rem;
+    text-align: center;
+    overflow-wrap: anywhere;
+  }
+
+  h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 1rem 0 0.35rem;
   }
 
   .outline-slot {

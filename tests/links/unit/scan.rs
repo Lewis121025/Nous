@@ -137,3 +137,43 @@ fn markdown_and_wiki_fragments_resolve_to_note() {
     let incoming = vault.links_to("t.md").expect("入链");
     assert_eq!(incoming.len(), 4);
 }
+
+#[test]
+fn wiki_ranges_use_original_bytes_before_entity_decoding() {
+    let body = "中文 \\* &amp; [[A&#38;B|别名]] tail\n";
+    let (root, _index, vault) = vault_with(&[("A&B.md", "note"), ("src.md", body)]);
+    let links = vault.links_from("src.md").expect("出链");
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].to_path.as_deref(), Some("A&B.md"));
+    assert_eq!(
+        source_slice(
+            root.path(),
+            "src.md",
+            links[0].start_byte,
+            links[0].end_byte
+        ),
+        "[[A&#38;B|别名]]"
+    );
+}
+
+#[test]
+fn wiki_scan_agrees_with_editor_syntax_boundaries() {
+    let body = "---\nexample: '[[Other]]'\n---\n\n\\[[Other]] &#91;&#91;Other&#93;&#93; $[[Other]]$\n\n$$\n[[Other]]\n$$\n\n[x](<./[[Other]].md>)\n\n[[Other]]\n\n[Other]: ./elsewhere.md\n";
+    let (_root, _index, vault) = vault_with(&[("Other.md", "note"), ("src.md", body)]);
+    let links = vault.links_from("src.md").expect("出链");
+    let wiki: Vec<_> = links
+        .iter()
+        .filter(|link| link.kind == LinkKind::Wiki)
+        .collect();
+    assert_eq!(wiki.len(), 1);
+    assert_eq!(wiki[0].to_path.as_deref(), Some("Other.md"));
+}
+
+#[test]
+fn inline_data_and_external_image_urls_are_not_reported_as_local_dead_links() {
+    let body = "![data](data:image/png;base64,AAAA) ![remote](//example.com/a.png) [call](tel:123) ![local](./photo.png)\n";
+    let (_root, _index, vault) = vault_with(&[("photo.png", "image bytes"), ("src.md", body)]);
+    let links = vault.links_from("src.md").unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].to_path.as_deref(), Some("photo.png"));
+}

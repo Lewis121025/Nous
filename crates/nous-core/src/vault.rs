@@ -1,10 +1,9 @@
 //! 笔记库：根目录约束下的原始字节读写与链接索引。
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use rusqlite::Connection;
@@ -19,15 +18,16 @@ use crate::scan;
 
 /// 已打开的笔记库。
 ///
-/// `root` 是笔记文件的唯一真相；`index_dir` 仅存放索引，由调用方提供且应在库外。
+/// `root` 是已保存笔记的唯一真相；`index_dir` 存放派生索引、草稿与操作恢复记录，应在库外。
 pub struct Vault {
     root: PathBuf,
     index_dir: PathBuf,
     conn: Mutex<Connection>,
-    /// 索引提交代次：刷新若带着更早快照回来则丢弃，避免盖住已经提交的写入。
-    index_epoch: AtomicU64,
     /// 最近一次扫描的库内路径。列目录和解析链接走这里，避免每次下盘。
     inventory: Mutex<Option<Inventory>>,
+    /// 文件提交串行化，避免两次应用内保存同时通过版本检查。
+    writes: Mutex<()>,
+    pub(super) recovery: crate::recovery::RecoveryStore,
 }
 
 impl Vault {
@@ -37,7 +37,7 @@ impl Vault {
     ///
     /// # Errors
     ///
-    /// 根不是目录、无法创建索引目录或索引写入失败时返回错误。
+    /// 根不是目录、状态目录不可用、改名恢复受阻或索引写入失败时返回错误。
     pub fn open(root: impl AsRef<Path>, index_dir: impl AsRef<Path>) -> Result<Self, Error> {
         let root = root.as_ref().to_path_buf();
         let metadata = fs::metadata(&root)?;
@@ -49,15 +49,19 @@ impl Vault {
         }
         let index_dir = index_dir.as_ref().to_path_buf();
         fs::create_dir_all(&index_dir)?;
+        let _operation = lock_operation(&index_dir)?;
+        let recovery = crate::recovery::RecoveryStore::open(&index_dir.join("recovery.sqlite"))?;
+        crate::rename::recover_pending(&root, &recovery)?;
         let conn = index::open_connection(&index_dir.join("index.sqlite"))?;
         let vault = Self {
             root,
             index_dir,
             conn: Mutex::new(conn),
-            index_epoch: AtomicU64::new(0),
             inventory: Mutex::new(None),
+            writes: Mutex::new(()),
+            recovery,
         };
-        let _ = vault.refresh_index()?;
+        let _ = vault.refresh_index_locked()?;
         Ok(vault)
     }
 
@@ -76,15 +80,19 @@ impl Vault {
     ///
     /// 读盘或写索引失败。
     pub fn refresh_index(&self) -> Result<bool, Error> {
+        let _guard = self.lock_writes()?;
+        self.refresh_index_locked()
+    }
+
+    pub(super) fn refresh_index_locked(&self) -> Result<bool, Error> {
         let files = self.scan_files()?;
         self.store_inventory(files.clone())?;
-        let (indexed_files, indexed_links, stale_scan, epoch) = {
+        let (indexed_files, indexed_links, stale_scan) = {
             let conn = self.lock_conn()?;
             (
                 index::load_files(&conn)?,
                 index::load_links(&conn)?,
                 index::scan_version(&conn)? != index::SCAN_VERSION,
-                self.index_epoch.load(Ordering::SeqCst),
             )
         };
         let by_path: HashMap<String, FileRow> = indexed_files
@@ -163,11 +171,7 @@ impl Vault {
         }
 
         let conn = self.lock_conn()?;
-        if self.index_epoch.load(Ordering::SeqCst) != epoch {
-            return Ok(false);
-        }
         index::replace_all(&conn, &file_rows, &links)?;
-        self.index_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(true)
     }
 
@@ -175,6 +179,17 @@ impl Vault {
         self.conn
             .lock()
             .map_err(|_| Error::Io(io::Error::other("索引锁已毒化")))
+    }
+
+    pub(super) fn lock_writes(&self) -> Result<WriteGuard<'_>, Error> {
+        let local = self
+            .writes
+            .lock()
+            .map_err(|_| Error::Io(io::Error::other("文件写入锁已毒化")))?;
+        Ok(WriteGuard {
+            _local: local,
+            _operation: lock_operation(&self.index_dir)?,
+        })
     }
 
     fn lock_inventory(&self) -> Result<std::sync::MutexGuard<'_, Option<Inventory>>, Error> {
@@ -214,40 +229,7 @@ impl Vault {
         }
     }
 
-    /// 原子写入相对路径，成功后重扫该文件所属索引。
-    ///
-    /// # Errors
-    ///
-    /// 路径越界返回 [`Error::PathEscape`]。
-    pub fn write(&self, rel: &str, bytes: &[u8]) -> Result<(), Error> {
-        self.write_disk(rel, bytes)?;
-        self.reindex_written(rel, bytes)
-    }
-
-    fn write_disk(&self, rel: &str, bytes: &[u8]) -> Result<(), Error> {
-        let path = resolve_in_root(&self.root, rel)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("nous-tmp");
-        {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-        }
-        fs::rename(&tmp, &path)?;
-        if let Some(parent) = path.parent() {
-            let dir = File::open(parent)?;
-            dir.sync_all()?;
-        }
-        Ok(())
-    }
-
-    /// 列出库内文件的相对路径（跳过以 `.` 开头的目录与文件）。
+    /// 列出库内文件及可恢复草稿的相对路径（跳过以 `.` 开头的磁盘条目）。
     ///
     /// 打开或刷新之后走内存名单，避免每次解析链接、加载图片都递归扫盘。
     ///
@@ -255,6 +237,14 @@ impl Vault {
     ///
     /// 读目录失败时返回 IO 错误。
     pub fn list_files(&self) -> Result<Vec<String>, Error> {
+        let mut files = self.list_disk_files()?;
+        files.extend(self.recovery.paths()?);
+        files.sort();
+        files.dedup();
+        Ok(files)
+    }
+
+    fn list_disk_files(&self) -> Result<Vec<String>, Error> {
         {
             let guard = self.lock_inventory()?;
             if let Some(inventory) = guard.as_ref() {
@@ -266,7 +256,7 @@ impl Vault {
         Ok(files)
     }
 
-    fn scan_files(&self) -> Result<Vec<String>, Error> {
+    pub(super) fn scan_files(&self) -> Result<Vec<String>, Error> {
         let mut out = Vec::new();
         collect_files(&self.root, &self.root, &mut out)?;
         out.sort();
@@ -403,106 +393,10 @@ impl Vault {
         resolve_against(inventory, from, raw, kind)
     }
 
-    /// 将库内文件改名为 `to`（相对路径），并按字节区间更新全库链接。
-    ///
-    /// 目标已存在则失败且不改任何文件。失败时尽量把已写入的文件恢复为改名前快照。
-    ///
-    /// # Errors
-    ///
-    /// 越界、源不存在、目标已存在或 IO/索引失败。
-    pub fn rename(&self, from: &str, to: &str) -> Result<(), Error> {
-        if from == to {
-            return Ok(());
-        }
-        let from_abs = resolve_in_root(&self.root, from)?;
-        let to_abs = resolve_in_root(&self.root, to)?;
-        if !from_abs.is_file() {
-            return Err(Error::NotFound { path: from_abs });
-        }
-        if to_abs.exists() {
-            return Err(Error::AlreadyExists { path: to_abs });
-        }
-
-        let incoming = self.links_to(from)?;
-        let mut by_file: std::collections::HashMap<String, Vec<LinkRecord>> =
-            std::collections::HashMap::new();
-        for link in incoming {
-            by_file
-                .entry(link.from_path.clone())
-                .or_default()
-                .push(link);
-        }
-
-        let mut snapshots: std::collections::HashMap<String, Vec<u8>> =
-            std::collections::HashMap::new();
-        let mut patched: std::collections::HashMap<String, Vec<u8>> =
-            std::collections::HashMap::new();
-
-        for (path, mut links) in by_file {
-            links.sort_by_key(|link| std::cmp::Reverse(link.start_byte));
-            let mut bytes = self.read(&path)?;
-            snapshots.insert(path.clone(), bytes.clone());
-            for link in links {
-                let start = usize::try_from(link.start_byte).map_err(|_| {
-                    Error::Io(io::Error::new(io::ErrorKind::InvalidData, "链接起点溢出"))
-                })?;
-                let end = usize::try_from(link.end_byte).map_err(|_| {
-                    Error::Io(io::Error::new(io::ErrorKind::InvalidData, "链接终点溢出"))
-                })?;
-                if end > bytes.len() || start > end {
-                    return Err(Error::Io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "链接区间超出文件",
-                    )));
-                }
-                let original = std::str::from_utf8(&bytes[start..end]).map_err(|_| {
-                    Error::Io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "链接区间不是 UTF-8",
-                    ))
-                })?;
-                let new_target = match link.kind {
-                    crate::link::LinkKind::Wiki => crate::rewrite::wiki_target_name(to),
-                    crate::link::LinkKind::Markdown => {
-                        crate::rewrite::relative_markdown_url(&path, to)
-                    }
-                };
-                let replacement = crate::rewrite::rewrite_span(link.kind, original, &new_target);
-                let mut next = Vec::with_capacity(bytes.len() - (end - start) + replacement.len());
-                next.extend_from_slice(&bytes[..start]);
-                next.extend_from_slice(replacement.as_bytes());
-                next.extend_from_slice(&bytes[end..]);
-                bytes = next;
-            }
-            patched.insert(path, bytes);
-        }
-
-        for (path, bytes) in &patched {
-            self.write_disk(path, bytes)?;
-        }
-        if let Some(parent) = to_abs.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        if let Err(err) = fs::rename(&from_abs, &to_abs) {
-            for (path, bytes) in &snapshots {
-                let _ = self.write_disk(path, bytes);
-            }
-            return Err(Error::from(err));
-        }
-        if let Err(err) = self.refresh_index() {
-            let _ = fs::rename(&to_abs, &from_abs);
-            for (path, bytes) in &snapshots {
-                let _ = self.write_disk(path, bytes);
-            }
-            return Err(err);
-        }
-        Ok(())
-    }
-
     /// 用刚写入的字节更新该文件索引；文件集合变了才重算全库指向。
     ///
     /// 必须扫盘：外部删文件不会走 `write`，缓存里还留着旧路径。
-    fn reindex_written(&self, rel: &str, bytes: &[u8]) -> Result<(), Error> {
+    pub(super) fn reindex_written(&self, rel: &str, bytes: &[u8]) -> Result<(), Error> {
         let files = self.scan_files()?;
         self.store_inventory(files.clone())?;
         let inventory = Inventory::from_files(files);
@@ -529,21 +423,37 @@ impl Vault {
             }
             index::replace_links(&conn, &links)?;
         }
-        self.index_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
 
+// 文件句柄释放时自动解锁；多个内核实例不能把进行中的改名当作崩溃日志恢复。
+pub(super) struct WriteGuard<'a> {
+    _local: std::sync::MutexGuard<'a, ()>,
+    _operation: fs::File,
+}
+
+fn lock_operation(index_dir: &Path) -> Result<fs::File, Error> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(index_dir.join("operations.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
 /// 库内路径名单与 wiki 名到路径的映射。
 #[derive(Clone)]
-struct Inventory {
+pub(super) struct Inventory {
     files: Vec<String>,
     set: HashSet<String>,
     wiki: HashMap<String, Vec<String>>,
 }
 
 impl Inventory {
-    fn from_files(files: Vec<String>) -> Self {
+    pub(super) fn from_files(files: Vec<String>) -> Self {
         let wiki = wiki_map(&files);
         let set = files.iter().cloned().collect();
         Self { files, set, wiki }
@@ -660,7 +570,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), E
     Ok(())
 }
 
-fn resolve_against(
+pub(super) fn resolve_against(
     inventory: &Inventory,
     from: &str,
     raw: &str,
@@ -683,6 +593,10 @@ fn resolve_wiki(inventory: &Inventory, raw: &str) -> Option<String> {
 }
 
 fn resolve_markdown(inventory: &Inventory, from: &str, raw: &str) -> Option<String> {
+    let decoded = percent_encoding::percent_decode_str(raw)
+        .decode_utf8()
+        .ok()?;
+    let raw = decoded.as_ref();
     let base = Path::new(from).parent().unwrap_or_else(|| Path::new(""));
     let joined = base.join(raw);
     let mut out = PathBuf::new();

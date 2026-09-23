@@ -1,123 +1,9 @@
-import { createHash } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { createRequire } from "node:module";
 import { app, dialog, ipcMain } from "electron";
 import type { BrowserWindow } from "electron";
-import type {
-  LinkKind,
-  LinkRecord,
-  MentionRecord,
-  Mentions,
-  PaneLayout,
-  VaultRestore,
-} from "../shared/api";
-import { parseLinkKind, parseMentionKind } from "../shared/api";
+import type { LinkKind, PaneLayout } from "../shared/api";
 import { onFlushResult, type CloseGate } from "./close-gate";
-import { loadSession, parsePaneLayout, patchSession, sessionFile, type Session } from "./session";
-
-const require = createRequire(import.meta.url);
-
-type NativeAddon = {
-  vaultOpen: (root: string, indexDir: string, onChanged: () => void) => void;
-  vaultClose: () => void;
-  vaultList: () => string[];
-  fileRead: (rel: string) => Buffer;
-  fileWrite: (rel: string, bytes: Buffer) => void;
-  linksResolve: (from: string, raw: string, kind: string) => string | null;
-  indexLinksTo: (path: string) => NativeLink[];
-  indexLinksFrom: (path: string) => NativeLink[];
-  indexMentionsTo: (path: string) => NativeMentions;
-  entryRename: (from: string, to: string) => void;
-};
-
-type NativeLink = {
-  fromPath: string;
-  toRaw: string;
-  toPath?: string;
-  kind: string;
-  startByte: number;
-  endByte: number;
-};
-
-type NativeMention = {
-  fromPath: string;
-  fromTitle: string;
-  mtime: number;
-  startByte: number;
-  endByte: number;
-  snippet: string;
-  kind: string;
-  linkKind?: string;
-  toRaw: string;
-};
-
-type NativeMentions = {
-  linked: NativeMention[];
-  unlinked: NativeMention[];
-};
-
-const native = require("@nous/native") as NativeAddon;
-
-function indexDirFor(root: string): string {
-  const hash = createHash("sha256").update(root).digest("hex").slice(0, 16);
-  return join(app.getPath("userData"), "vaults", hash);
-}
-
-function sessionPath(): string {
-  return sessionFile(app.getPath("userData"));
-}
-
-function isDirectory(path: string): boolean {
-  try {
-    return existsSync(path) && statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function mapLink(link: NativeLink): LinkRecord {
-  const kind: LinkKind = link.kind === "wiki" ? "wiki" : "md";
-  return {
-    fromPath: link.fromPath,
-    toRaw: link.toRaw,
-    toPath: link.toPath ?? null,
-    kind,
-    startByte: link.startByte,
-    endByte: link.endByte,
-  };
-}
-
-function mapMention(mention: NativeMention): MentionRecord | null {
-  const kind = parseMentionKind(mention.kind);
-  if (kind === null) {
-    return null;
-  }
-  return {
-    fromPath: mention.fromPath,
-    fromTitle: mention.fromTitle,
-    mtime: mention.mtime,
-    startByte: mention.startByte,
-    endByte: mention.endByte,
-    snippet: mention.snippet,
-    kind,
-    linkKind: kind === "linked" ? parseLinkKind(mention.linkKind ?? "") : null,
-    toRaw: mention.toRaw,
-  };
-}
-
-function mapMentions(value: NativeMentions): Mentions {
-  return {
-    linked: value.linked.flatMap((item) => {
-      const mapped = mapMention(item);
-      return mapped === null ? [] : [mapped];
-    }),
-    unlinked: value.unlinked.flatMap((item) => {
-      const mapped = mapMention(item);
-      return mapped === null ? [] : [mapped];
-    }),
-  };
-}
+import type { CoreClient } from "./core-client";
+import { parsePaneLayout, type Session } from "./session";
 
 function panesFromSession(session: Session): PaneLayout {
   return {
@@ -131,19 +17,19 @@ function panesFromSession(session: Session): PaneLayout {
   };
 }
 
-function openNativeVault(root: string, getWindow: () => BrowserWindow | null): void {
-  native.vaultOpen(root, indexDirFor(root), () => {
-    getWindow()?.webContents.send("vault.changed");
-  });
-}
-
 /**
- * 注册主进程 IPC。只转发 `nous-core` 经 napi 暴露的命令，以及关窗口冲刷。
+ * 注册主进程 IPC；内核与磁盘操作交给工作线程，主线程只处理窗口交互。
  *
- * @param getWindow 用于把监视事件推到当前窗口。
+ * @param getWindow 获取目录对话框的父窗口和允许关闭的当前窗口。
  * @param closeGate 关窗口闸门；冲刷成功后放行。
+ * @param core 按顺序执行内核操作的客户端。
+ * @throws IPC 通道重复注册时抛出 Electron 错误；命令异常通过各自的请求返回。
  */
-export function registerIpc(getWindow: () => BrowserWindow | null, closeGate: CloseGate): void {
+export function registerIpc(
+  getWindow: () => BrowserWindow | null,
+  closeGate: CloseGate,
+  core: CoreClient,
+): void {
   ipcMain.handle("vault.open", async () => {
     const window = getWindow();
     const result = window
@@ -153,77 +39,50 @@ export function registerIpc(getWindow: () => BrowserWindow | null, closeGate: Cl
     if (result.canceled || root === undefined) {
       return null;
     }
-    openNativeVault(root, getWindow);
-    patchSession(sessionPath(), { vaultRoot: root, currentPath: null });
-    return root;
+    return core.call("vaultOpen", root);
   });
 
-  ipcMain.handle("vault.restore", (): VaultRestore | null => {
-    const session = loadSession(sessionPath());
-    const root = session.vaultRoot;
-    if (root === null || !isDirectory(root)) {
-      return null;
-    }
-    try {
-      openNativeVault(root, getWindow);
-    } catch {
-      return null;
-    }
-    return { root, currentPath: session.currentPath };
-  });
+  ipcMain.handle("vault.restore", () => core.call("vaultRestore"));
 
   ipcMain.handle("session.setCurrent", (_event, path: unknown) => {
     const currentPath = typeof path === "string" && path !== "" ? path : null;
-    patchSession(sessionPath(), { currentPath });
+    return core.call("sessionPatch", { currentPath });
   });
 
-  ipcMain.handle("session.getPanes", (): PaneLayout => {
-    const session = loadSession(sessionPath());
+  ipcMain.handle("session.getPanes", async (): Promise<PaneLayout> => {
+    const session = await core.call("sessionLoad");
     return panesFromSession(session);
   });
 
   ipcMain.handle("session.setPanes", (_event, panes: unknown) => {
     const parsed = parsePaneLayout(panes);
-    if (parsed === null) {
-      return;
-    }
-    patchSession(sessionPath(), parsed);
+    if (parsed === null) return;
+    return core.call("sessionPatch", parsed);
   });
 
-  ipcMain.handle("vault.close", () => {
-    native.vaultClose();
-  });
-
-  ipcMain.handle("vault.list", () => native.vaultList());
-
-  ipcMain.handle("file.read", (_event, rel: string) => {
-    const buffer = native.fileRead(rel);
-    return new Uint8Array(buffer);
-  });
-
-  ipcMain.handle("file.write", (_event, rel: string, bytes: Uint8Array) => {
-    native.fileWrite(rel, Buffer.from(bytes));
-  });
-
-  ipcMain.handle("links.resolve", (_event, from: string, raw: string, kind: LinkKind) => {
-    return native.linksResolve(from, raw, kind);
-  });
-
-  ipcMain.handle("index.linksTo", (_event, path: string) => {
-    return native.indexLinksTo(path).map(mapLink);
-  });
-
-  ipcMain.handle("index.linksFrom", (_event, path: string) => {
-    return native.indexLinksFrom(path).map(mapLink);
-  });
-
-  ipcMain.handle("index.mentionsTo", (_event, path: string) => {
-    return mapMentions(native.indexMentionsTo(path));
-  });
-
-  ipcMain.handle("entry.rename", (_event, from: string, to: string) => {
-    native.entryRename(from, to);
-  });
+  ipcMain.handle("vault.close", () => core.call("vaultClose"));
+  ipcMain.handle("vault.list", () => core.call("vaultList"));
+  ipcMain.handle("file.read", (_event, rel: string) => core.call("fileRead", rel));
+  ipcMain.handle("file.snapshot", (_event, rel: string) => core.call("fileSnapshot", rel));
+  ipcMain.handle(
+    "file.write",
+    (_event, rel: string, bytes: Uint8Array, expected: Uint8Array | null) =>
+      core.call("fileWrite", rel, bytes, expected),
+  );
+  ipcMain.handle(
+    "file.writeCopy",
+    (_event, rel: string, bytes: Uint8Array, expected: Uint8Array | null) =>
+      core.call("fileWriteCopy", rel, bytes, expected),
+  );
+  ipcMain.handle("links.resolve", (_event, from: string, raw: string, kind: LinkKind) =>
+    core.call("linksResolve", from, raw, kind),
+  );
+  ipcMain.handle("index.linksTo", (_event, path: string) => core.call("indexLinksTo", path));
+  ipcMain.handle("index.linksFrom", (_event, path: string) => core.call("indexLinksFrom", path));
+  ipcMain.handle("index.mentionsTo", (_event, path: string) => core.call("indexMentionsTo", path));
+  ipcMain.handle("entry.rename", (_event, from: string, to: string) =>
+    core.call("entryRename", from, to),
+  );
 
   ipcMain.handle("app.closeAfterFlush", () => {
     const action = onFlushResult(closeGate, true);
