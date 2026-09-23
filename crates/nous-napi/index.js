@@ -310,13 +310,15 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { vaultOpen, vaultClose, vaultList, fileRead, fileWrite, linksResolve, indexLinksTo, indexLinksFrom, entryRename } = nativeBinding
+const { vaultOpen, vaultClose, vaultList, fileRead, fileSnapshot, fileWrite, fileWriteCopy, linksResolve, indexLinksTo, indexLinksFrom, entryRename } = nativeBinding
 
 module.exports.vaultOpen = vaultOpen
 module.exports.vaultClose = vaultClose
 module.exports.vaultList = vaultList
 module.exports.fileRead = fileRead
+module.exports.fileSnapshot = fileSnapshot
 module.exports.fileWrite = fileWrite
+module.exports.fileWriteCopy = fileWriteCopy
 module.exports.linksResolve = linksResolve
 module.exports.indexLinksTo = indexLinksTo
 module.exports.indexLinksFrom = indexLinksFrom

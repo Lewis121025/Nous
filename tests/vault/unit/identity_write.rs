@@ -17,7 +17,9 @@ fn identity_write_preserves_original_bytes() {
 
     let read = vault.read("note.md").expect("读取");
     assert_eq!(read, original);
-    vault.write("note.md", &read).expect("identity 写回");
+    vault
+        .write("note.md", &read, Some(&read))
+        .expect("identity 写回");
 
     let after = fs::read(root.path().join("note.md")).expect("再读磁盘");
     assert_eq!(after, original);
@@ -33,6 +35,8 @@ fn read_rejects_path_escape() {
 #[test]
 fn write_rejects_path_escape() {
     let (_root, _index, vault) = open_temp_vault();
-    let err = vault.write("../secret.txt", b"x").expect_err("越界应失败");
+    let err = vault
+        .write("../secret.txt", b"x", None)
+        .expect_err("越界应失败");
     assert!(matches!(err, Error::PathEscape));
 }

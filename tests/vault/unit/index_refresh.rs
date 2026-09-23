@@ -35,7 +35,7 @@ fn write_updates_own_links_without_reading_unreadable_sibling() {
 
     let sibling = root.path().join("B.md");
     let previous = make_unreadable(&sibling);
-    let written = vault.write("A.md", b"[[C]]\n");
+    let written = vault.write("A.md", b"[[C]]\n", Some(b"hello\n"));
     restore_permissions(&sibling, previous);
     written.expect("写 A 不应去读 B");
 
@@ -69,7 +69,9 @@ fn write_after_external_delete_re_resolves_remaining_wiki() {
         .any(|link| link.to_path.as_deref() == Some("B.md")));
 
     fs::remove_file(root.path().join("B.md")).expect("删 B");
-    vault.write("A.md", b"hello again\n").expect("写 A");
+    vault
+        .write("A.md", b"hello again\n", Some(b"hello\n"))
+        .expect("写 A");
 
     let from_c = vault.links_from("C.md").expect("C 应重算");
     assert!(from_c
@@ -86,7 +88,7 @@ fn write_new_unique_note_resolves_existing_dead_wiki() {
         .iter()
         .any(|link| link.to_raw == "B" && link.to_path.is_none()));
 
-    vault.write("B.md", b"# B\n").expect("新建 B");
+    vault.write("B.md", b"# B\n", None).expect("新建 B");
 
     let incoming = vault.links_to("B.md").expect("入链");
     assert!(incoming.iter().any(|link| link.from_path == "A.md"));
@@ -146,6 +148,8 @@ fn write_existing_file_does_not_rebuild_sibling_row() {
     let (_root, index, vault) = open_temp_vault(&[("A.md", "hello\n"), ("B.md", "keep\n")]);
     let probe = open_index(&index);
     let sibling = file_rowid(&probe, "B.md");
-    vault.write("A.md", b"hello again\n").expect("写 A");
+    vault
+        .write("A.md", b"hello again\n", Some(b"hello\n"))
+        .expect("写 A");
     assert_eq!(file_rowid(&probe, "B.md"), sibling);
 }

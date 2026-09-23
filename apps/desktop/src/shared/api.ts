@@ -43,6 +43,24 @@ export type VaultRestore = {
   currentPath: string | null;
 };
 
+/** 打开文件时同时取回尚未提交的编辑，删除后的文件也能恢复。 */
+export type FileSnapshot = {
+  /** 当前磁盘内容；不存在为 null。 */
+  disk: Uint8Array | null;
+  /** 保存失败或冲突时持久化的内容及其编辑基准。 */
+  draft: { bytes: Uint8Array; base: Uint8Array | null } | null;
+};
+
+/** 文件内容提交与派生索引失败必须分别处理。 */
+export type WriteResult =
+  { status: "saved"; warning: string | null } | { status: "conflict"; disk: Uint8Array | null };
+
+/** 保留原文件后，新副本的实际位置。 */
+export type SavedCopy = { path: string; warning: string | null };
+
+/** 改名已提交，索引或恢复记录的清理可能需要重试。 */
+export type RenameOutcome = { warning: string | null };
+
 export type NousApi = {
   /** 弹出选目录对话框并打开库；取消时返回 `null`。 */
   vaultOpen: () => Promise<string | null>;
@@ -64,8 +82,16 @@ export type NousApi = {
   vaultList: () => Promise<string[]>;
   /** 读取原始字节。 */
   fileRead: (rel: string) => Promise<Uint8Array>;
-  /** 原子写入。 */
-  fileWrite: (rel: string, bytes: Uint8Array) => Promise<void>;
+  /** 加载编辑器快照，包括可恢复草稿。 */
+  fileSnapshot: (rel: string) => Promise<FileSnapshot>;
+  /** 核对 expected 后原子提交；null 仅允许创建新文件。 */
+  fileWrite: (rel: string, bytes: Uint8Array, expected: Uint8Array | null) => Promise<WriteResult>;
+  /** 独占创建同目录副本，保留原文件和已有副本。 */
+  fileWriteCopy: (
+    rel: string,
+    bytes: Uint8Array,
+    expected: Uint8Array | null,
+  ) => Promise<SavedCopy>;
   /** 解析内部链接。 */
   linksResolve: (from: string, raw: string, kind: LinkKind) => Promise<string | null>;
   /** 入链。 */
@@ -73,7 +99,7 @@ export type NousApi = {
   /** 出链。 */
   indexLinksFrom: (path: string) => Promise<LinkRecord[]>;
   /** 改名并更新链接。 */
-  entryRename: (from: string, to: string) => Promise<void>;
+  entryRename: (from: string, to: string) => Promise<RenameOutcome>;
   /**
    * 订阅库文件变更（监视防抖后）。
    *

@@ -1,0 +1,203 @@
+/** @vitest-environment jsdom */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EditorState, NodeSelection } from "prosemirror-state";
+import { EditorView } from "prosemirror-view";
+import { createHtmlNodeViews } from "@engine/html-view";
+import { createImageNodeViews } from "@engine/image-view";
+import { mathNodeViews } from "@engine/math-view";
+import { parseMarkdown } from "@engine/markdown";
+import { observeViewport } from "@engine/viewport";
+
+const { visibility, renderTex, peekRenderedTex } = vi.hoisted(() => ({
+  visibility: new Map<HTMLElement, (visible: boolean) => void>(),
+  renderTex: vi.fn<(...args: unknown[]) => Promise<HTMLElement>>(),
+  peekRenderedTex: vi.fn(() => null),
+}));
+
+vi.mock("@engine/viewport", () => ({
+  observeViewport: vi.fn((element: HTMLElement, listener: (visible: boolean) => void) => {
+    visibility.set(element, listener);
+    return () => visibility.delete(element);
+  }),
+  mathPlaceholderText: (tex: string, display: boolean) => (display ? `$$${tex}$$` : `$${tex}$`),
+}));
+vi.mock("@engine/mathjax", () => ({ renderTex, peekRenderedTex }));
+
+const views = new Set<EditorView>();
+const revokeUrl = vi.fn();
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  renderTex.mockImplementation(async () => document.createElement("span"));
+  vi.stubGlobal(
+    "URL",
+    class extends URL {
+      static revokeObjectURL = revokeUrl;
+    },
+  );
+});
+
+afterEach(() => {
+  for (const view of views) view.destroy();
+  views.clear();
+  visibility.clear();
+  vi.unstubAllGlobals();
+  document.body.replaceChildren();
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function start(
+  source: string,
+  kind: "html" | "math" | "image",
+  loadMedia = vi.fn(async (_src: string) => "blob:image"),
+) {
+  const target = document.createElement("div");
+  document.body.append(target);
+  const view = new EditorView(target, {
+    state: EditorState.create({ doc: parseMarkdown(`# Title\n\n${source}`) }),
+    nodeViews: {
+      ...mathNodeViews,
+      ...createHtmlNodeViews(loadMedia),
+      ...createImageNodeViews(loadMedia),
+    },
+  });
+  views.add(view);
+  const nodeDom = target.querySelector(kind === "image" ? ".note-image" : `.${kind}-block`);
+  if (!(nodeDom instanceof HTMLElement)) throw new Error("测试节点未挂载");
+  let pos = -1;
+  view.state.doc.descendants((node, offset) => {
+    if (node.type.name === (kind === "image" ? "image" : `${kind}_block`)) pos = offset;
+  });
+  return {
+    view,
+    pos,
+    nodeDom,
+    loadMedia,
+    visible: (visible: boolean) => visibility.get(nodeDom)?.(visible),
+    edit: () =>
+      view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos))),
+    destroy: () => {
+      view.destroy();
+      views.delete(view);
+    },
+  };
+}
+
+describe("源码节点的预览生命周期", () => {
+  it("图片重复可见通知只读取一次，修改来源和重新进入视口仍会加载", async () => {
+    const pending = deferred<string>();
+    const load = vi.fn(async (src: string) =>
+      src === "first.png" ? pending.promise : "blob:second",
+    );
+    const editor = start("![图片](first.png)", "image", load);
+    editor.visible(true);
+    editor.visible(true);
+    expect(load).toHaveBeenCalledTimes(1);
+    editor.view.dispatch(editor.view.state.tr.setNodeAttribute(editor.pos, "src", "second.png"));
+    await Promise.resolve();
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(editor.nodeDom.getAttribute("src")).toBe("blob:second");
+    pending.resolve("blob:first");
+    await vi.waitFor(() => expect(revokeUrl).toHaveBeenCalledWith("blob:first"));
+    editor.visible(true);
+    expect(load).toHaveBeenCalledTimes(2);
+    editor.visible(false);
+    expect(revokeUrl).toHaveBeenCalledWith("blob:second");
+    editor.visible(true);
+    await Promise.resolve();
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(editor.nodeDom.getAttribute("src")).toBe("blob:second");
+  });
+
+  it.each(["html", "math"] as const)("%s 在视口监听同步回调时也能完成初始化", async (kind) => {
+    vi.mocked(observeViewport).mockImplementationOnce((_element, onChange) => {
+      onChange(true);
+      return () => {};
+    });
+    const source = kind === "html" ? '<div><img src="image.png"></div>' : "$$\nx\n$$";
+    const editor = start(source, kind);
+    await Promise.resolve();
+    expect(kind === "html" ? editor.loadMedia : renderTex).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["html", "math"] as const)("%s 重复可见通知不重新渲染，也不修改文档", async (kind) => {
+    const source = kind === "html" ? '<div><img src="image.png"></div>' : "$$\nx\n$$";
+    const editor = start(source, kind);
+    const original = editor.view.state.doc;
+    editor.visible(true);
+    editor.visible(true);
+    await Promise.resolve();
+    expect(kind === "html" ? editor.loadMedia : renderTex).toHaveBeenCalledTimes(1);
+    expect(editor.view.state.doc).toBe(original);
+  });
+
+  it.each(["编辑源码", "移出视口", "销毁节点"])(
+    "%s 时立即释放已获得的图片，迟到图片也会释放",
+    async (action) => {
+      const second = deferred<string>();
+      const load = vi.fn(async (src: string) =>
+        src === "first.png" ? "blob:first" : second.promise,
+      );
+      const editor = start('<div><img src="first.png"><img src="second.png"></div>', "html", load);
+      editor.visible(true);
+      await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+      if (action === "编辑源码") editor.edit();
+      else if (action === "移出视口") editor.visible(false);
+      else editor.destroy();
+
+      expect(revokeUrl).toHaveBeenCalledWith("blob:first");
+      second.resolve("blob:second");
+      await vi.waitFor(() => expect(revokeUrl).toHaveBeenCalledWith("blob:second"));
+      expect(revokeUrl).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("已经离开 HTML 预览时不再启动剩余图片的读取", async () => {
+    const first = deferred<string>();
+    const load = vi.fn(() => first.promise);
+    const editor = start('<div><img src="first.png"><img src="second.png"></div>', "html", load);
+    editor.visible(true);
+    editor.edit();
+    first.resolve("blob:first");
+    await vi.waitFor(() => expect(revokeUrl).toHaveBeenCalledWith("blob:first"));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(editor.nodeDom.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("迟到的公式排版不能覆盖正在编辑的源码", async () => {
+    const rendered = deferred<HTMLElement>();
+    renderTex.mockReturnValueOnce(rendered.promise);
+    const editor = start("$$\nx\n$$", "math");
+    editor.visible(true);
+    editor.edit();
+    const field = editor.nodeDom.querySelector("textarea");
+    rendered.resolve(document.createElement("span"));
+    await Promise.resolve();
+    expect(editor.nodeDom.querySelector("textarea")).toBe(field);
+  });
+
+  it("旧公式排版不能覆盖更新后的预览", async () => {
+    const original = deferred<HTMLElement>();
+    renderTex.mockReturnValueOnce(original.promise);
+    const editor = start("$$\nx\n$$", "math");
+    editor.visible(true);
+    const updated = document.createElement("span");
+    updated.textContent = "updated";
+    renderTex.mockResolvedValueOnce(updated);
+    editor.view.dispatch(editor.view.state.tr.setNodeAttribute(editor.pos, "tex", "y"));
+    await Promise.resolve();
+    expect(editor.nodeDom.firstChild).toBe(updated);
+    const doc = editor.view.state.doc;
+    original.resolve(document.createElement("div"));
+    await Promise.resolve();
+    expect(editor.nodeDom.firstChild).toBe(updated);
+    expect(editor.view.state.doc).toBe(doc);
+  });
+});

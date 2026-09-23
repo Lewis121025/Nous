@@ -16,8 +16,14 @@ pub enum Error {
     Io(io::Error),
     /// `SQLite` 索引失败。
     Index(rusqlite::Error),
+    /// 编辑草稿或文件操作恢复记录的持久化、读取失败。
+    Recovery(rusqlite::Error),
     /// 改名目标已存在。
     AlreadyExists { path: PathBuf },
+    /// 改名计划读取后，磁盘内容又发生变化。
+    FileChanged { path: PathBuf },
+    /// 改名恢复尚未完成，日志必须保留以便重试。
+    RenameRecovery { detail: String },
 }
 
 impl std::fmt::Display for Error {
@@ -27,7 +33,10 @@ impl std::fmt::Display for Error {
             Self::NotFound { path } => write!(f, "文件不存在: {}", path.display()),
             Self::Io(err) => write!(f, "{err}"),
             Self::Index(err) => write!(f, "索引: {err}"),
+            Self::Recovery(err) => write!(f, "恢复记录: {err}"),
             Self::AlreadyExists { path } => write!(f, "目标已存在: {}", path.display()),
+            Self::FileChanged { path } => write!(f, "文件已被外部修改: {}", path.display()),
+            Self::RenameRecovery { detail } => write!(f, "改名恢复未完成：{detail}"),
         }
     }
 }
@@ -36,8 +45,12 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
-            Self::Index(err) => Some(err),
-            Self::PathEscape | Self::NotFound { .. } | Self::AlreadyExists { .. } => None,
+            Self::Index(err) | Self::Recovery(err) => Some(err),
+            Self::PathEscape
+            | Self::NotFound { .. }
+            | Self::AlreadyExists { .. }
+            | Self::FileChanged { .. }
+            | Self::RenameRecovery { .. } => None,
         }
     }
 }

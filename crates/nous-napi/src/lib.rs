@@ -6,7 +6,7 @@ use std::time::Duration;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use nous_core::{LinkKind, Vault, WatchHandle};
+use nous_core::{LinkKind, Vault, WatchHandle, WriteOutcome};
 
 struct AppState {
     vault: Arc<Vault>,
@@ -25,13 +25,22 @@ fn lock_state() -> Result<std::sync::MutexGuard<'static, Option<AppState>>> {
         .map_err(|_| Error::from_reason("内核状态锁已毒化"))
 }
 
-fn vault_ref(state: &AppState) -> &Vault {
-    state.vault.as_ref()
+/// 在整个内核调用期间持有状态锁，切库不能使正在执行的操作失去归属。
+fn with_vault<T>(
+    operation: impl FnOnce(&Vault) -> std::result::Result<T, nous_core::Error>,
+) -> Result<T> {
+    let state = lock_state()?;
+    let state = state
+        .as_ref()
+        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
+    operation(&state.vault).map_err(to_napi)
 }
 
 /// 打开库并开始监视。
 ///
-/// `on_changed` 在防抖后的监视线程上调用，主进程应据此通知渲染进程。
+/// `root` 是库目录，`index_dir` 是库外的派生索引与恢复目录。
+/// 监视线程在防抖与索引刷新后，将 `on_changed` 投递给持有内核的 JS 线程。
+/// 成功后替换当前库及其监视器；失败时保留原库。
 ///
 /// # Errors
 ///
@@ -75,11 +84,7 @@ pub fn vault_close() -> Result<()> {
 /// 未打开库或读目录失败。
 #[napi]
 pub fn vault_list() -> Result<Vec<String>> {
-    let state = lock_state()?;
-    let state = state
-        .as_ref()
-        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
-    vault_ref(state).list_files().map_err(to_napi)
+    with_vault(Vault::list_files)
 }
 
 /// 读取文件原始字节。
@@ -89,28 +94,102 @@ pub fn vault_list() -> Result<Vec<String>> {
 /// 未打开库、越界或不存在。
 #[napi]
 pub fn file_read(rel: String) -> Result<Buffer> {
-    let state = lock_state()?;
-    let state = state
-        .as_ref()
-        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
-    let bytes = vault_ref(state).read(&rel).map_err(to_napi)?;
-    Ok(Buffer::from(bytes))
+    with_vault(|vault| vault.read(&rel)).map(Buffer::from)
 }
 
-/// 原子写入文件并重建索引。
+/// 已持久化的恢复草稿。
+#[napi(object)]
+pub struct JsDraft {
+    /// 编辑内容。
+    pub bytes: Buffer,
+    /// 原编辑基准；缺失表示新文件。
+    pub base: Option<Buffer>,
+}
+
+/// 编辑器加载快照，文件删除时仍可恢复草稿。
+#[napi(object)]
+pub struct JsFileSnapshot {
+    /// 磁盘内容；缺失表示文件已删除。
+    pub disk: Option<Buffer>,
+    /// 尚未提交的编辑。
+    pub draft: Option<JsDraft>,
+}
+
+/// 获取 `rel` 的磁盘内容与恢复草稿。
 ///
 /// # Errors
 ///
-/// 未打开库或越界。
+/// 未打开库、越界或读取失败。
 #[napi]
-pub fn file_write(rel: String, bytes: Buffer) -> Result<()> {
-    let state = lock_state()?;
-    let state = state
-        .as_ref()
-        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
-    vault_ref(state)
-        .write(&rel, bytes.as_ref())
-        .map_err(to_napi)
+pub fn file_snapshot(rel: String) -> Result<JsFileSnapshot> {
+    let snapshot = with_vault(|vault| vault.snapshot(&rel))?;
+    Ok(JsFileSnapshot {
+        disk: snapshot.disk.map(Buffer::from),
+        draft: snapshot.draft.map(|draft| JsDraft {
+            bytes: Buffer::from(draft.bytes),
+            base: draft.base.map(Buffer::from),
+        }),
+    })
+}
+
+/// 文件提交结果，冲突时附带磁盘版本。
+#[napi(object)]
+pub struct JsWriteResult {
+    /// `saved` 或 `conflict`。
+    pub status: String,
+    /// 冲突的磁盘字节；缺失也可能表示文件被删除。
+    pub disk: Option<Buffer>,
+    /// 已提交后的同步、索引或清理警告。
+    pub warning: Option<String>,
+}
+
+/// 按 `expected` 基准保存 `bytes`，返回提交状态或冲突。
+///
+/// # Errors
+///
+/// 未打开库、越界、草稿持久化或内容提交失败。
+#[napi]
+pub fn file_write(rel: String, bytes: Buffer, expected: Option<Buffer>) -> Result<JsWriteResult> {
+    let result = with_vault(|vault| vault.write(&rel, bytes.as_ref(), expected.as_deref()))?;
+    Ok(match result {
+        WriteOutcome::Saved { warning } => JsWriteResult {
+            status: "saved".into(),
+            disk: None,
+            warning,
+        },
+        WriteOutcome::Conflict { disk } => JsWriteResult {
+            status: "conflict".into(),
+            disk: disk.map(Buffer::from),
+            warning: None,
+        },
+    })
+}
+
+/// 新副本的路径与提交后警告。
+#[napi(object)]
+pub struct JsSavedCopy {
+    /// 实际创建的相对路径。
+    pub path: String,
+    /// 内容已保存后的警告。
+    pub warning: Option<String>,
+}
+
+/// 将当前 `bytes` 写入唯一命名的新副本，`expected` 用于恢复基准。
+///
+/// # Errors
+///
+/// 未打开库、路径非法或副本提交失败。
+#[napi]
+pub fn file_write_copy(
+    rel: String,
+    bytes: Buffer,
+    expected: Option<Buffer>,
+) -> Result<JsSavedCopy> {
+    let copy = with_vault(|vault| vault.write_copy(&rel, bytes.as_ref(), expected.as_deref()))?;
+    Ok(JsSavedCopy {
+        path: copy.path,
+        warning: copy.warning,
+    })
 }
 
 /// 解析链接目标。
@@ -125,11 +204,7 @@ pub fn links_resolve(from: String, raw: String, kind: String) -> Result<Option<S
     let kind: LinkKind = kind
         .parse()
         .map_err(|()| Error::from_reason("未知链接种类"))?;
-    let state = lock_state()?;
-    let state = state
-        .as_ref()
-        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
-    Ok(vault_ref(state).resolve_link(&from, &raw, kind))
+    with_vault(|vault| Ok(vault.resolve_link(&from, &raw, kind)))
 }
 
 /// 一条索引中的链接。
@@ -167,13 +242,7 @@ fn to_js(link: nous_core::LinkRecord) -> JsLinkRecord {
 /// 未打开库。
 #[napi]
 pub fn index_links_to(path: String) -> Result<Vec<JsLinkRecord>> {
-    let state = lock_state()?;
-    let state = state
-        .as_ref()
-        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
-    Ok(vault_ref(state)
-        .links_to(&path)
-        .map_err(to_napi)?
+    Ok(with_vault(|vault| vault.links_to(&path))?
         .into_iter()
         .map(to_js)
         .collect())
@@ -186,28 +255,28 @@ pub fn index_links_to(path: String) -> Result<Vec<JsLinkRecord>> {
 /// 未打开库。
 #[napi]
 pub fn index_links_from(path: String) -> Result<Vec<JsLinkRecord>> {
-    let state = lock_state()?;
-    let state = state
-        .as_ref()
-        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
-    Ok(vault_ref(state)
-        .links_from(&path)
-        .map_err(to_napi)?
+    Ok(with_vault(|vault| vault.links_from(&path))?
         .into_iter()
         .map(to_js)
         .collect())
 }
 
-/// 改名并更新全库链接。
+/// 文件已经完成改名，索引或日志清理可能仍需重试。
+#[napi(object)]
+pub struct JsRenameOutcome {
+    /// 提交后的警告；无警告时缺失。
+    pub warning: Option<String>,
+}
+
+/// 将 `from` 改名为 `to` 并更新全库链接，返回提交后的警告。
 ///
 /// # Errors
 ///
 /// 未打开库、目标已存在或写盘失败。
 #[napi]
-pub fn entry_rename(from: String, to: String) -> Result<()> {
-    let state = lock_state()?;
-    let state = state
-        .as_ref()
-        .ok_or_else(|| Error::from_reason("尚未打开库"))?;
-    vault_ref(state).rename(&from, &to).map_err(to_napi)
+pub fn entry_rename(from: String, to: String) -> Result<JsRenameOutcome> {
+    let result = with_vault(|vault| vault.rename(&from, &to))?;
+    Ok(JsRenameOutcome {
+        warning: result.warning,
+    })
 }

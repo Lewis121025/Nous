@@ -26,6 +26,10 @@ name = "vault_integration_watch"
 path = "../../tests/vault/integration/watch.rs"
 
 [[test]]
+name = "vault_integration_save_recovery"
+path = "../../tests/vault/integration/save_recovery.rs"
+
+[[test]]
 name = "links_unit_scan"
 path = "../../tests/links/unit/scan.rs"
 
@@ -33,14 +37,19 @@ path = "../../tests/links/unit/scan.rs"
 name = "links_integration_rename"
 path = "../../tests/links/integration/rename.rs"
 
+[[test]]
+name = "links_integration_rename_recovery"
+path = "../../tests/links/integration/rename_recovery.rs"
+
 [dev-dependencies]
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-tempfile = "3.23.0"
 
 [dependencies]
 markdown = "1.0.0"
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
+percent-encoding = "2.3.2"
 regex = "1.13.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.11.0"
+tempfile = "3.23.0"

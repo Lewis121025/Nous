@@ -1,0 +1,45 @@
+/** 解析与序列化共用语法配置，避免两端对 GFM、公式和转义的理解不同。 */
+import remarkGfm from "remark-gfm";
+import remarkFrontmatter from "remark-frontmatter";
+import remarkMath from "remark-math";
+import remarkParse from "remark-parse";
+import remarkStringify from "remark-stringify";
+import { unified } from "unified";
+import { remarkWiki, type WikiLink } from "./wiki";
+
+/** 已确认的 Markdown 语法片段；不经过普通文本转义。 */
+export type RawMarkdown = { type: "rawMarkdown"; value: string };
+
+declare module "mdast" {
+  interface RootContentMap {
+    rawMarkdown: RawMarkdown;
+  }
+  interface BlockContentMap {
+    rawMarkdown: RawMarkdown;
+  }
+  interface PhrasingContentMap {
+    rawMarkdown: RawMarkdown;
+  }
+}
+
+/** 共用处理器；自定义片段只用于 wiki 语法和未提供富文本编辑的源码。 */
+export const markdownProcessor = unified()
+  .use(remarkParse)
+  .use(remarkFrontmatter, ["yaml", "toml"])
+  .use(remarkGfm, { tablePipeAlign: false })
+  .use(remarkMath)
+  .use(remarkWiki)
+  .use(remarkStringify, {
+    bullet: "-",
+    emphasis: "*",
+    fences: true,
+    listItemIndent: "one",
+    rule: "-",
+    ruleSpaces: false,
+    handlers: {
+      wikiLink: (node: WikiLink, _parent, state) =>
+        state.stack.includes("tableCell") ? node.value.replace(/\|/g, "\\|") : node.value,
+      rawMarkdown: (node: RawMarkdown, _parent, state) =>
+        state.stack.includes("tableCell") ? node.value.replace(/\|/g, "\\|") : node.value,
+    },
+  });

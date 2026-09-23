@@ -43,6 +43,7 @@ class ImageNodeView implements NodeView {
     this.dom.style.minWidth = "1.5rem";
     this.dom.style.minHeight = "1.5rem";
     this.stopObserve = observeViewport(this.dom, (visible) => {
+      if (visible === this.visible) return;
       this.visible = visible;
       if (visible) {
         this.startLoad();

@@ -12,6 +12,7 @@
   import type { MarkdownEditorApi } from "./engine/editor-api";
   import { createHtmlNodeViews } from "./engine/html-view";
   import { createImageNodeViews } from "./engine/image-view";
+  import { createPdfNodeViews } from "./engine/pdf-view";
   import { mathInputPlugins, mathNodeViews } from "./engine/math-view";
   import { parseMarkdown, serializeMarkdown } from "./engine/markdown";
   import { browserMediaIo, resolveMediaUrl } from "./engine/media";
@@ -84,8 +85,20 @@
           ...mathNodeViews,
           ...createHtmlNodeViews(loadMd),
           ...createImageNodeViews(loadAny),
+          ...createPdfNodeViews(notePath, openLink),
         },
         handleClickOn(_view, _pos, node) {
+          if (node.type.name === "image") {
+            const src = String(node.attrs["src"] ?? "");
+            if (
+              src === "" ||
+              isExternalHref(src) ||
+              node.marks.some((mark) => mark.type.name === "link")
+            )
+              return false;
+            openLink(node.attrs["kind"] === "wiki" ? "wiki" : "md", src);
+            return true;
+          }
           if (node.type.name !== "wiki_link") {
             return false;
           }

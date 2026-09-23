@@ -6,7 +6,9 @@
 /**
  * 打开库并开始监视。
  *
- * `on_changed` 在防抖后的监视线程上调用，主进程应据此通知渲染进程。
+ * `root` 是库目录，`index_dir` 是库外的派生索引与恢复目录。
+ * 监视线程在防抖与索引刷新后，将 `on_changed` 投递给持有内核的 JS 线程。
+ * 成功后替换当前库及其监视器；失败时保留原库。
  *
  * # Errors
  *
@@ -37,14 +39,60 @@ export declare function vaultList(): Array<string>
  * 未打开库、越界或不存在。
  */
 export declare function fileRead(rel: string): Buffer
+/** 已持久化的恢复草稿。 */
+export interface JsDraft {
+  /** 编辑内容。 */
+  bytes: Buffer
+  /** 原编辑基准；缺失表示新文件。 */
+  base?: Buffer
+}
+/** 编辑器加载快照，文件删除时仍可恢复草稿。 */
+export interface JsFileSnapshot {
+  /** 磁盘内容；缺失表示文件已删除。 */
+  disk?: Buffer
+  /** 尚未提交的编辑。 */
+  draft?: JsDraft
+}
 /**
- * 原子写入文件并重建索引。
+ * 获取 `rel` 的磁盘内容与恢复草稿。
  *
  * # Errors
  *
- * 未打开库或越界。
+ * 未打开库、越界或读取失败。
  */
-export declare function fileWrite(rel: string, bytes: Buffer): void
+export declare function fileSnapshot(rel: string): JsFileSnapshot
+/** 文件提交结果，冲突时附带磁盘版本。 */
+export interface JsWriteResult {
+  /** `saved` 或 `conflict`。 */
+  status: string
+  /** 冲突的磁盘字节；缺失也可能表示文件被删除。 */
+  disk?: Buffer
+  /** 已提交后的同步、索引或清理警告。 */
+  warning?: string
+}
+/**
+ * 按 `expected` 基准保存 `bytes`，返回提交状态或冲突。
+ *
+ * # Errors
+ *
+ * 未打开库、越界、草稿持久化或内容提交失败。
+ */
+export declare function fileWrite(rel: string, bytes: Buffer, expected?: Buffer | undefined | null): JsWriteResult
+/** 新副本的路径与提交后警告。 */
+export interface JsSavedCopy {
+  /** 实际创建的相对路径。 */
+  path: string
+  /** 内容已保存后的警告。 */
+  warning?: string
+}
+/**
+ * 将当前 `bytes` 写入唯一命名的新副本，`expected` 用于恢复基准。
+ *
+ * # Errors
+ *
+ * 未打开库、路径非法或副本提交失败。
+ */
+export declare function fileWriteCopy(rel: string, bytes: Buffer, expected?: Buffer | undefined | null): JsSavedCopy
 /**
  * 解析链接目标。
  *
@@ -86,11 +134,16 @@ export declare function indexLinksTo(path: string): Array<JsLinkRecord>
  * 未打开库。
  */
 export declare function indexLinksFrom(path: string): Array<JsLinkRecord>
+/** 文件已经完成改名，索引或日志清理可能仍需重试。 */
+export interface JsRenameOutcome {
+  /** 提交后的警告；无警告时缺失。 */
+  warning?: string
+}
 /**
- * 改名并更新全库链接。
+ * 将 `from` 改名为 `to` 并更新全库链接，返回提交后的警告。
  *
  * # Errors
  *
  * 未打开库、目标已存在或写盘失败。
  */
-export declare function entryRename(from: string, to: string): void
+export declare function entryRename(from: string, to: string): JsRenameOutcome

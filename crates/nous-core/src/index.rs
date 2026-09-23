@@ -55,7 +55,7 @@ pub fn open_connection(path: &std::path::Path) -> Result<Connection, Error> {
 }
 
 /// 扫描器/解析输出格式。区间或目标解析变了必须加一，已打开的库才会重扫而不是复用旧行。
-pub(crate) const SCAN_VERSION: i32 = 2;
+pub(crate) const SCAN_VERSION: i32 = 5;
 
 /// 当前索引里记录的扫描器版本；从未写过则为 0。
 pub(crate) fn scan_version(conn: &Connection) -> Result<i32, Error> {
