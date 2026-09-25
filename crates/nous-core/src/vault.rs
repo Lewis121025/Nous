@@ -13,7 +13,7 @@ use crate::error::Error;
 use crate::index::{self, FileRow};
 use crate::link::LinkRecord;
 use crate::mention::{self, MentionKind, MentionRecord, Mentions};
-use crate::pathutil::resolve_in_root;
+use crate::pathutil::{path_to_slashes, resolve_in_root};
 use crate::scan;
 
 /// 已打开的笔记库。
@@ -25,6 +25,8 @@ pub struct Vault {
     conn: Mutex<Connection>,
     /// 最近一次扫描的库内路径。列目录和解析链接走这里，避免每次下盘。
     inventory: Mutex<Option<Inventory>>,
+    /// 空目录也参与监视变更判断，文件树不能依赖文件索引推断全部目录。
+    directories: Mutex<Vec<String>>,
     /// 文件提交串行化，避免两次应用内保存同时通过版本检查。
     writes: Mutex<()>,
     pub(super) recovery: crate::recovery::RecoveryStore,
@@ -58,6 +60,7 @@ impl Vault {
             index_dir,
             conn: Mutex::new(conn),
             inventory: Mutex::new(None),
+            directories: Mutex::new(Vec::new()),
             writes: Mutex::new(()),
             recovery,
         };
@@ -85,7 +88,17 @@ impl Vault {
     }
 
     pub(super) fn refresh_index_locked(&self) -> Result<bool, Error> {
-        let files = self.scan_files()?;
+        let entries = crate::entries::scan_entries(&self.root, false)?;
+        let files: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.kind == crate::EntryKind::File)
+            .map(|entry| entry.path.clone())
+            .collect();
+        let directories: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| entry.kind == crate::EntryKind::Directory)
+            .map(|entry| entry.path)
+            .collect();
         self.store_inventory(files.clone())?;
         let (indexed_files, indexed_links, stale_scan) = {
             let conn = self.lock_conn()?;
@@ -123,7 +136,7 @@ impl Vault {
                 .zip(&mtimes)
                 .all(|(rel, mtime)| by_path.get(rel).is_some_and(|old| old.mtime == *mtime));
             if all_match {
-                return Ok(false);
+                return self.store_directories(directories);
             }
         }
 
@@ -172,7 +185,18 @@ impl Vault {
 
         let conn = self.lock_conn()?;
         index::replace_all(&conn, &file_rows, &links)?;
+        self.store_directories(directories)?;
         Ok(true)
+    }
+
+    fn store_directories(&self, directories: Vec<String>) -> Result<bool, Error> {
+        let mut previous = self
+            .directories
+            .lock()
+            .map_err(|_| Error::Io(io::Error::other("目录缓存锁已毒化")))?;
+        let changed = *previous != directories;
+        *previous = directories;
+        Ok(changed)
     }
 
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, Error> {
@@ -244,7 +268,7 @@ impl Vault {
         Ok(files)
     }
 
-    fn list_disk_files(&self) -> Result<Vec<String>, Error> {
+    pub(super) fn list_disk_files(&self) -> Result<Vec<String>, Error> {
         {
             let guard = self.lock_inventory()?;
             if let Some(inventory) = guard.as_ref() {
@@ -257,10 +281,19 @@ impl Vault {
     }
 
     pub(super) fn scan_files(&self) -> Result<Vec<String>, Error> {
-        let mut out = Vec::new();
-        collect_files(&self.root, &self.root, &mut out)?;
-        out.sort();
-        Ok(out)
+        Ok(crate::entries::scan_entries(&self.root, false)?
+            .into_iter()
+            .filter(|entry| entry.kind == crate::EntryKind::File)
+            .map(|entry| entry.path)
+            .collect())
+    }
+
+    pub(super) fn directory_paths(&self) -> Result<Vec<String>, Error> {
+        Ok(self
+            .directories
+            .lock()
+            .map_err(|_| Error::Io(io::Error::other("目录缓存锁已毒化")))?
+            .clone())
     }
 
     /// 指向 `path` 的入链。
@@ -547,29 +580,6 @@ fn hex_sha256(bytes: &[u8]) -> String {
     })
 }
 
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), Error> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with('.') {
-            continue;
-        }
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_files(root, &path, out)?;
-        } else if file_type.is_file() {
-            let rel = path
-                .strip_prefix(root)
-                .map_err(|_| Error::PathEscape)?
-                .to_string_lossy()
-                .replace('\\', "/");
-            out.push(rel);
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn resolve_against(
     inventory: &Inventory,
     from: &str,
@@ -612,6 +622,6 @@ fn resolve_markdown(inventory: &Inventory, from: &str, raw: &str) -> Option<Stri
             Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    let rel = out.to_string_lossy().replace('\\', "/");
+    let rel = path_to_slashes(&out).ok()?;
     inventory.set.contains(&rel).then_some(rel)
 }

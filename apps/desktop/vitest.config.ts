@@ -3,6 +3,7 @@ import { defineConfig } from "vitest/config";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 
 export default defineConfig({
+  root: fileURLToPath(new URL(".", import.meta.url)),
   plugins: [svelte({ compilerOptions: { hmr: false } })],
   resolve: {
     // vitest 默认走 svelte 的 server 入口，mount/$effect 会报 lifecycle_function_unavailable
@@ -12,8 +13,8 @@ export default defineConfig({
       electron: fileURLToPath(new URL("./node_modules/electron/index.js", import.meta.url)),
       // PDF 渲染的故障注入必须命中应用实际加载的模块，避免根目录解析到另一个模块 ID。
       "pdfjs-dist": fileURLToPath(new URL("./node_modules/pdfjs-dist", import.meta.url)),
-      "@engine": fileURLToPath(new URL("./src/renderer/src/engine", import.meta.url)),
-      "@renderer": fileURLToPath(new URL("./src/renderer/src", import.meta.url)),
+      "@reader": fileURLToPath(new URL("./src/features/reader", import.meta.url)),
+      "@app": fileURLToPath(new URL("./src/renderer", import.meta.url)),
     },
   },
   test: {

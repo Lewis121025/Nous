@@ -3,7 +3,7 @@ import { defineConfig } from "vitest/config";
 // 真实内核测试需要先构建原生模块与工作线程，由根目录 test:core 统一执行。
 export default defineConfig({
   test: {
-    include: ["../../tests/desktop/integration/core-native.test.mts"],
+    include: ["../../tests/reader/integration/native/core-native.test.mts"],
     environment: "node",
     testTimeout: 15000,
   },

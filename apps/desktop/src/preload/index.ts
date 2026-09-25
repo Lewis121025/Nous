@@ -1,50 +1,20 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type {
-  FileSnapshot,
-  LinkKind,
-  LinkRecord,
-  Mentions,
-  NousApi,
-  PaneLayout,
-  RenameOutcome,
-  SavedCopy,
-  VaultRestore,
-  WriteResult,
-} from "../shared/api";
+import { createReaderApi } from "../features/reader/preload/api";
+import type { Appearance, AppApi, NousApi } from "../shared/api";
+import { parseAppCommand } from "../shared/api";
 
-const api: NousApi = {
-  vaultOpen: () => ipcRenderer.invoke("vault.open") as Promise<string | null>,
-  vaultRestore: () => ipcRenderer.invoke("vault.restore") as Promise<VaultRestore | null>,
-  sessionSetCurrent: (path) => ipcRenderer.invoke("session.setCurrent", path) as Promise<void>,
-  sessionGetPanes: () => ipcRenderer.invoke("session.getPanes") as Promise<PaneLayout>,
-  sessionSetPanes: (panes) => ipcRenderer.invoke("session.setPanes", panes) as Promise<void>,
-  vaultClose: () => ipcRenderer.invoke("vault.close") as Promise<void>,
-  vaultList: () => ipcRenderer.invoke("vault.list") as Promise<string[]>,
-  fileRead: (rel: string) => ipcRenderer.invoke("file.read", rel) as Promise<Uint8Array>,
-  fileSnapshot: (rel) => ipcRenderer.invoke("file.snapshot", rel) as Promise<FileSnapshot>,
-  fileWrite: (rel, bytes, expected) =>
-    ipcRenderer.invoke("file.write", rel, bytes, expected) as Promise<WriteResult>,
-  fileWriteCopy: (rel, bytes, expected) =>
-    ipcRenderer.invoke("file.writeCopy", rel, bytes, expected) as Promise<SavedCopy>,
-  linksResolve: (from: string, raw: string, kind: LinkKind) =>
-    ipcRenderer.invoke("links.resolve", from, raw, kind) as Promise<string | null>,
-  indexLinksTo: (path: string) =>
-    ipcRenderer.invoke("index.linksTo", path) as Promise<LinkRecord[]>,
-  indexMentionsTo: (path: string) =>
-    ipcRenderer.invoke("index.mentionsTo", path) as Promise<Mentions>,
-  indexLinksFrom: (path: string) =>
-    ipcRenderer.invoke("index.linksFrom", path) as Promise<LinkRecord[]>,
-  entryRename: (from: string, to: string) =>
-    ipcRenderer.invoke("entry.rename", from, to) as Promise<RenameOutcome>,
-  subscribeVaultChanged: (callback: () => void) => {
-    const listener = (): void => {
-      callback();
+const app: AppApi = {
+  historyChanged: (availability) => ipcRenderer.send("app.historyChanged", availability),
+  subscribeCommand: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown): void => {
+      const command = parseAppCommand(value);
+      if (command !== null) callback(command);
     };
-    ipcRenderer.on("vault.changed", listener);
-    return () => {
-      ipcRenderer.removeListener("vault.changed", listener);
-    };
+    ipcRenderer.on("app.command", listener);
+    return () => ipcRenderer.removeListener("app.command", listener);
   },
+  appearanceGet: () => ipcRenderer.invoke("appearance.get") as Promise<Appearance>,
+  appearanceSet: (appearance) => ipcRenderer.invoke("appearance.set", appearance) as Promise<void>,
   subscribeFlushBeforeClose: (callback: () => void) => {
     const listener = (): void => {
       callback();
@@ -57,5 +27,5 @@ const api: NousApi = {
   closeAfterFlush: () => ipcRenderer.invoke("app.closeAfterFlush") as Promise<void>,
   closeBlocked: () => ipcRenderer.invoke("app.closeBlocked") as Promise<void>,
 };
-
+const api: NousApi = { app, reader: createReaderApi() };
 contextBridge.exposeInMainWorld("nous", api);

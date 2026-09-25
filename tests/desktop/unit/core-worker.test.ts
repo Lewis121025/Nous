@@ -9,7 +9,7 @@ const { port, service } = vi.hoisted(() => ({
     ),
     close: vi.fn(),
   },
-  service: { fileRead: vi.fn(), fileSnapshot: vi.fn(), fileWrite: vi.fn(), vaultClose: vi.fn() },
+  service: { fileRead: vi.fn(), fileSnapshot: vi.fn(), fileWrite: vi.fn(), shutdown: vi.fn() },
 }));
 vi.mock("node:worker_threads", () => ({ parentPort: port, workerData: "/state" }));
 vi.mock("../../../apps/desktop/src/main/core-service", () => ({

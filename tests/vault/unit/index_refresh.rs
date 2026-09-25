@@ -4,6 +4,29 @@ use nous_core::Vault;
 use std::fs;
 use tempfile::TempDir;
 
+#[test]
+fn missing_derived_table_rebuilds_without_removing_recovery_state() {
+    let root = tempfile::tempdir().unwrap();
+    let index = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("target.md"), "target").unwrap();
+    fs::write(root.path().join("ref.md"), "[[target]]").unwrap();
+    let vault = nous_core::Vault::open(root.path(), index.path()).unwrap();
+    assert_eq!(vault.links_to("target.md").unwrap().len(), 1);
+    vault
+        .write("target.md", b"recoverable draft", Some(b"stale"))
+        .unwrap();
+    drop(vault);
+    let database = rusqlite::Connection::open(index.path().join("index.sqlite")).unwrap();
+    database.execute("DROP TABLE links", []).unwrap();
+    drop(database);
+    let reopened = nous_core::Vault::open(root.path(), index.path()).unwrap();
+    assert_eq!(reopened.links_to("target.md").unwrap().len(), 1);
+    assert_eq!(
+        reopened.snapshot("target.md").unwrap().draft.unwrap().bytes,
+        b"recoverable draft"
+    );
+}
+
 fn open_temp_vault(files: &[(&str, &str)]) -> (TempDir, TempDir, Vault) {
     let root = TempDir::new().expect("库目录");
     let index = TempDir::new().expect("索引目录");

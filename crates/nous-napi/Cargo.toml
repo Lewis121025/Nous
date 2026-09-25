@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 nous-core = { path = "../nous-core" }
 napi = { version = "2.16.17", default-features = false, features = ["napi8"] }
 napi-derive = "2.16.13"
+trash = "5.2.9"
 
 [build-dependencies]
 napi-build = "2.1.6"

@@ -1,0 +1,47 @@
+name: Quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      NOUS_QUALITY_ARTIFACTS: ${{ runner.temp }}/nous-quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm lint
+      - run: pnpm test
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: pnpm build
+      - run: pnpm --filter @nous/desktop test:core
+      - if: runner.os == 'macOS'
+        run: pnpm --filter @nous/desktop test:preview
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a pnpm --filter @nous/desktop test:preview
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: visual-scenes-${{ matrix.os }}
+          path: ${{ runner.temp }}/nous-quality
+          if-no-files-found: ignore

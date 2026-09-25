@@ -15,6 +15,19 @@ struct AppState {
 
 static STATE: Mutex<Option<AppState>> = Mutex::new(None);
 
+/// 监视通知携带受影响路径及健康状态；失败不能伪装成一次成功刷新。
+#[napi(object)]
+pub struct JsVaultEvent {
+    /// changed、watch-error 或 index-error。
+    pub status: String,
+    /// 已约束到当前库的相对路径，空列表表示需要完整刷新。
+    pub paths: Vec<String>,
+    /// 本次确实完成了监视后的索引校验。
+    pub healthy: bool,
+    /// 异常原因；成功事件不提供。
+    pub message: Option<String>,
+}
+
 fn to_napi(err: nous_core::Error) -> Error {
     Error::from_reason(err.to_string())
 }
@@ -47,14 +60,51 @@ fn with_vault<T>(
 /// 打不开目录、索引或监视器时失败。
 #[napi]
 pub fn vault_open(root: String, index_dir: String, on_changed: JsFunction) -> Result<()> {
-    let tsfn: ThreadsafeFunction<bool, ErrorStrategy::Fatal> = on_changed
-        .create_threadsafe_function(0, |ctx| ctx.env.get_boolean(ctx.value).map(|v| vec![v]))?;
+    let tsfn: ThreadsafeFunction<JsVaultEvent, ErrorStrategy::Fatal> =
+        on_changed.create_threadsafe_function(0, |ctx| Ok(vec![ctx.value]))?;
     let vault = Arc::new(Vault::open(&root, &index_dir).map_err(to_napi)?);
+    // macOS 监视事件会使用 /private/var 等物理路径，比较前只规范化库根，删除事件不能再解析文件。
+    let watch_root = std::fs::canonicalize(vault.root())
+        .map_err(|error| Error::from_reason(error.to_string()))?;
     let watched = Arc::clone(&vault);
-    let watch = nous_core::start_watch(root, Duration::from_millis(300), move || {
-        if matches!(watched.refresh_index(), Ok(true)) {
-            tsfn.call(true, ThreadsafeFunctionCallMode::NonBlocking);
-        }
+    let watch = nous_core::start_watch(root, Duration::from_millis(300), move |event| {
+        let notification = match event {
+            Err(message) => JsVaultEvent {
+                status: "watch-error".into(),
+                paths: Vec::new(),
+                healthy: false,
+                message: Some(message),
+            },
+            Ok(paths) => {
+                let paths = paths
+                    .into_iter()
+                    .filter_map(|path| {
+                        path.strip_prefix(&watch_root)
+                            .ok()
+                            .map(nous_core::path_to_slashes)
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>();
+                let (paths, refreshed) = match paths {
+                    Ok(paths) => (paths, watched.refresh_index()),
+                    Err(error) => (Vec::new(), Err(error)),
+                };
+                match refreshed {
+                    Ok(_) => JsVaultEvent {
+                        status: "changed".into(),
+                        paths,
+                        healthy: true,
+                        message: None,
+                    },
+                    Err(error) => JsVaultEvent {
+                        status: "index-error".into(),
+                        paths,
+                        healthy: false,
+                        message: Some(error.to_string()),
+                    },
+                }
+            }
+        };
+        tsfn.call(notification, ThreadsafeFunctionCallMode::NonBlocking);
     })
     .map_err(to_napi)?;
     let mut state = lock_state()?;
@@ -87,6 +137,92 @@ pub fn vault_list() -> Result<Vec<String>> {
     with_vault(Vault::list_files)
 }
 
+/// 文件树条目，包含空文件夹。
+#[napi(object)]
+pub struct JsVaultEntry {
+    /// 库内相对路径。
+    pub path: String,
+    /// file 或 directory。
+    pub kind: String,
+    /// 仅在草稿无法对应真实文件条目时设置。
+    pub recovery_only: Option<bool>,
+}
+
+/// 列出完整目录；未打开库或目录读取失败时返回错误。
+#[napi]
+pub fn vault_entries() -> Result<Vec<JsVaultEntry>> {
+    Ok(with_vault(Vault::list_entries)?
+        .into_iter()
+        .map(|entry| JsVaultEntry {
+            path: entry.path,
+            kind: match entry.kind {
+                nous_core::EntryKind::File => "file",
+                nous_core::EntryKind::Directory => "directory",
+            }
+            .into(),
+            recovery_only: entry.recovery_only.then_some(true),
+        })
+        .collect())
+}
+
+/// 创建空笔记或文件夹；非法类型、同名目标或磁盘失败时拒绝。
+#[napi]
+pub fn entry_create(path: String, kind: String) -> Result<JsRenameOutcome> {
+    let kind = match kind.as_str() {
+        "file" => nous_core::EntryKind::File,
+        "directory" => nous_core::EntryKind::Directory,
+        _ => return Err(Error::from_reason("未知条目类型")),
+    };
+    Ok(JsRenameOutcome {
+        warning: with_vault(|vault| vault.create_entry(&path, kind))?.warning,
+    })
+}
+
+/// 独占导入的附件位置和提交后警告。
+#[napi(object)]
+pub struct JsImportedAttachment {
+    /// 实际库内路径，同名避让后可能与原文件名不同。
+    pub path: String,
+    /// 文件已落盘后发生的索引或同步错误。
+    pub warning: Option<String>,
+}
+
+/// 导入用户选择的附件字节，返回实际位置；路径、大小与写盘错误由内核传播。
+#[napi]
+pub fn attachment_import(
+    from: String,
+    name: String,
+    bytes: Buffer,
+) -> Result<JsImportedAttachment> {
+    let result = with_vault(|vault| vault.import_attachment(&from, &name, bytes.as_ref()))?;
+    Ok(JsImportedAttachment {
+        path: result.path,
+        warning: result.warning,
+    })
+}
+
+/// 移入系统废纸篓；失败不退化为永久删除，未保存草稿阻止操作。
+#[napi]
+pub fn entry_trash(path: String) -> Result<JsRenameOutcome> {
+    let result = with_vault(|vault| {
+        vault.trash_entry(&path, |absolute| {
+            trash::delete(absolute)
+                .map_err(|error| nous_core::Error::Io(std::io::Error::other(error.to_string())))
+        })
+    })?;
+    Ok(JsRenameOutcome {
+        warning: result.warning,
+    })
+}
+
+/// 获取经过库根校验的现有路径，只供主进程调用系统文件管理器。
+#[napi]
+pub fn entry_path(path: String) -> Result<String> {
+    Ok(with_vault(|vault| vault.entry_path(&path))?
+        .to_string_lossy()
+        .into_owned())
+}
+
 /// 读取文件原始字节。
 ///
 /// # Errors
@@ -100,17 +236,21 @@ pub fn file_read(rel: String) -> Result<Buffer> {
 /// 已持久化的恢复草稿。
 #[napi(object)]
 pub struct JsDraft {
-    /// 编辑内容。
+    /// 普通草稿为最新内容；存在 editor 时为重建源码映射的原始字节。
     pub bytes: Buffer,
     /// 原编辑基准；缺失表示新文件。
     pub base: Option<Buffer>,
+    /// 版本化的编辑器恢复内容；没有时按普通 Markdown 字节恢复。
+    pub editor: Option<String>,
 }
 
 /// 编辑器加载快照，文件删除时仍可恢复草稿。
 #[napi(object)]
 pub struct JsFileSnapshot {
-    /// 磁盘内容；缺失表示文件已删除。
+    /// 磁盘内容；缺失时通过 disk_error 区分删除与读取失败。
     pub disk: Option<Buffer>,
+    /// 原路径不可读时保留草稿，并携带原因。
+    pub disk_error: Option<String>,
     /// 尚未提交的编辑。
     pub draft: Option<JsDraft>,
 }
@@ -125,10 +265,28 @@ pub fn file_snapshot(rel: String) -> Result<JsFileSnapshot> {
     let snapshot = with_vault(|vault| vault.snapshot(&rel))?;
     Ok(JsFileSnapshot {
         disk: snapshot.disk.map(Buffer::from),
+        disk_error: snapshot.disk_error,
         draft: snapshot.draft.map(|draft| JsDraft {
             bytes: Buffer::from(draft.bytes),
             base: draft.base.map(Buffer::from),
+            editor: draft.editor,
         }),
+    })
+}
+
+/// 持久化带版本的编辑恢复数据，保持原笔记字节不变。
+///
+/// # Errors
+/// 未打开库、路径或数据非法、恢复记录冲突或数据库不可写。
+#[napi]
+pub fn file_preserve_draft(
+    rel: String,
+    source: Buffer,
+    expected: Option<Buffer>,
+    editor: String,
+) -> Result<()> {
+    with_vault(|vault| {
+        vault.preserve_editor_draft(&rel, source.as_ref(), expected.as_deref(), &editor)
     })
 }
 

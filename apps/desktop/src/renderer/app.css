@@ -1,0 +1,85 @@
+:root {
+  color-scheme: light dark;
+  --bg: light-dark(#fdfdfc, #202022);
+  --fg: light-dark(#29292c, #eeeef0);
+  --border: light-dark(#e4e4e2, #3b3b40);
+  --sidebar: light-dark(#f3f3f1, #28282b);
+  --selected: light-dark(#e7e8e6, #3c3c41);
+  --muted: light-dark(#62646b, #b0b0ba);
+  --accent: light-dark(#2467aa, #79b8eb);
+  --accent-fill: light-dark(#2467aa, #286ca6);
+  --accent-text: #ffffff;
+  --warning: light-dark(#996412, #d9a34a);
+  --danger: light-dark(#aa3232, #f09494);
+  --shadow: light-dark(#00000014, #00000048);
+  --scrim: light-dark(#00000025, #00000055);
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --radius-control: 6px;
+  --radius-panel: 10px;
+  --motion-fast: 120ms;
+  --reading-width: 720px;
+  --font-reading: 17px;
+  --line-reading: 1.75;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "PingFang SC",
+    "Segoe UI",
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+body {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+button,
+summary,
+input,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+::selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

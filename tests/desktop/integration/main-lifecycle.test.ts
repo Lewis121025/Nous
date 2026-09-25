@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { onFlushResult, type CloseGate } from "../../../apps/desktop/src/main/close-gate";
 
-const { call, shutdown, register } = vi.hoisted(() => ({
+const { call, shutdown, register, historyItems } = vi.hoisted(() => ({
   call: vi.fn(),
   shutdown: vi.fn(),
   register: vi.fn(),
+  historyItems: new Map([
+    ["undo", { enabled: false }],
+    ["redo", { enabled: false }],
+  ]),
 }));
 
 vi.mock("node:worker_threads", () => ({ Worker: class {} }));
@@ -22,11 +26,11 @@ vi.mock("electron", async () => {
     static getAllWindows() {
       return Window.windows;
     }
-    webContents = {
+    webContents = Object.assign(new EventEmitter(), {
       isDestroyed: () => false,
       isLoadingMainFrame: () => false,
       send: vi.fn(),
-    };
+    });
     constructor() {
       super();
       Window.windows.push(this);
@@ -38,6 +42,11 @@ vi.mock("electron", async () => {
   }
   return {
     BrowserWindow: Window,
+    Menu: {
+      buildFromTemplate: vi.fn(),
+      setApplicationMenu: vi.fn(),
+      getApplicationMenu: vi.fn(() => ({ getMenuItemById: (id: string) => historyItems.get(id) })),
+    },
     app: Object.assign(new EventEmitter(), {
       whenReady: () => Promise.resolve(),
       getPath: () => "/state",
@@ -45,6 +54,7 @@ vi.mock("electron", async () => {
     }),
     dialog: { showErrorBox: vi.fn() },
     screen: {},
+    nativeTheme: { themeSource: "system", shouldUseDarkColors: false },
   };
 });
 
@@ -62,7 +72,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   vi.stubGlobal("__dirname", "/desktop/out/main");
-  call.mockResolvedValue({ window: null });
+  call.mockResolvedValue({ window: null, appearance: "system" });
 });
 
 afterEach(async () => {
@@ -80,6 +90,33 @@ async function start() {
 }
 
 describe("main process worker lifetime", () => {
+  it("页面重载、渲染进程退出及关闭窗口都会清除旧历史菜单状态", async () => {
+    const { window } = await start();
+    const enable = () => {
+      for (const item of historyItems.values()) item.enabled = true;
+    };
+    const disabled = () => {
+      expect([...historyItems.values()].every((item) => !item.enabled)).toBe(true);
+    };
+    enable();
+    window.webContents.emit("did-start-navigation", {}, "file:///index.html", false, false);
+    expect([...historyItems.values()].every((item) => item.enabled)).toBe(true);
+    window.webContents.emit("did-start-navigation", {}, "file:///index.html#anchor", true, true);
+    expect([...historyItems.values()].every((item) => item.enabled)).toBe(true);
+    window.webContents.emit("did-start-navigation", {}, "file:///index.html", false, true);
+    disabled();
+    enable();
+    window.webContents.emit("render-process-gone", {}, { reason: "crashed" });
+    disabled();
+    enable();
+    window.emit("closed");
+    disabled();
+  });
+  it("创建窗口前恢复应用外观", async () => {
+    call.mockResolvedValue({ window: null, appearance: "dark" });
+    const { nativeTheme } = await start();
+    expect(nativeTheme.themeSource).toBe("dark");
+  });
   it("flushes the editor before stopping and holds quit until the worker has exited", async () => {
     const stopped = deferred<void>();
     shutdown.mockReturnValue(stopped.promise);
@@ -113,7 +150,7 @@ describe("main process worker lifetime", () => {
   });
 
   it("does not create a window after quitting during asynchronous startup", async () => {
-    const loading = deferred<{ window: null }>();
+    const loading = deferred<{ window: null; appearance: "system" }>();
     const stopped = deferred<void>();
     call.mockReturnValue(loading.promise);
     shutdown.mockReturnValue(stopped.promise);
@@ -121,7 +158,7 @@ describe("main process worker lifetime", () => {
     const { app, BrowserWindow } = await import("electron");
     await vi.waitFor(() => expect(call).toHaveBeenCalledWith("sessionLoad"));
     app.emit("will-quit", { preventDefault: vi.fn() });
-    loading.resolve({ window: null });
+    loading.resolve({ window: null, appearance: "system" });
     stopped.resolve();
     await vi.waitFor(() => expect(app.quit).toHaveBeenCalledTimes(1));
     expect(BrowserWindow.getAllWindows()).toHaveLength(0);

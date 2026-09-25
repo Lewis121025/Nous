@@ -84,7 +84,8 @@ export default defineConfig({
   renderer: {
     resolve: {
       alias: {
-        "@renderer": resolve("src/renderer/src"),
+        "@app": resolve("src/renderer"),
+        "@reader": resolve("src/features/reader"),
         "@shared": resolve("src/shared"),
         "#js": resolve("node_modules/@mathjax/src/mjs"),
         "#default-font": resolve("node_modules/@mathjax/mathjax-newcm-font/mjs"),

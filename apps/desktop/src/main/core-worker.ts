@@ -19,7 +19,7 @@ function resultBuffers(value: unknown, buffers = new Set<ArrayBuffer>()): Set<Ar
   return buffers;
 }
 
-const service = createCoreService(workerData, () => send({ type: "changed" }));
+const service = createCoreService(workerData, (event) => send({ type: "changed", event }));
 
 // 映射签名保留命令与参数的对应关系，新增命令不需要额外分派分支或类型断言。
 const commands: {
@@ -33,7 +33,7 @@ function execute<C extends CoreCommand>(request: CoreRequest<C>): unknown {
 // 同步完成一条消息后才接下一条，保留保存、切库、停机的提交顺序。
 port.on("message", (request: CoreInput) => {
   if (request.type === "shutdown") {
-    service.vaultClose();
+    service.shutdown();
     send({ type: "stopped" });
     port.close();
     return;

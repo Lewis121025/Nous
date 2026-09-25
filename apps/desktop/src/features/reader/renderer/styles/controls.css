@@ -1,0 +1,63 @@
+.reader-button,
+.reader-input {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  min-height: 32px;
+}
+.reader-input {
+  min-width: 0;
+  padding: 0.5rem 0.65rem;
+}
+.reader-button {
+  min-width: 32px;
+  padding: 0.4rem 0.7rem;
+  cursor: pointer;
+}
+.reader-button:hover:not(:disabled) {
+  background: var(--selected);
+}
+.reader-button[aria-pressed="true"] {
+  background: var(--selected);
+  color: var(--accent);
+}
+.reader-button.primary {
+  background: var(--accent-fill);
+  color: var(--accent-text);
+  border-color: transparent;
+}
+.reader-button.primary:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+.reader-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.reader-popover {
+  position: fixed;
+  inset: 4rem 1rem auto auto;
+  margin: 0;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  box-shadow: 0 8px 30px var(--shadow);
+  padding: 0.4rem;
+  max-width: calc(100vw - 2rem);
+  max-height: calc(100dvh - 5rem);
+  overflow-y: auto;
+}
+
+.reader-icon {
+  width: 1.2rem;
+  height: 1.2rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex-shrink: 0;
+}

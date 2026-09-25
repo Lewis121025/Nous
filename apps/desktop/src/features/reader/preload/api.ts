@@ -1,0 +1,89 @@
+import { ipcRenderer } from "electron";
+import type { ReaderApi, VaultEvent } from "../shared/api";
+import { parseVaultEvent } from "../shared/api";
+import { parseAttachmentReply } from "../shared/attachments";
+import { parseFileSnapshot, parseDraftReply } from "../shared/editor-recovery";
+import {
+  parseEmptyReply,
+  parseEntryOutcome,
+  parseFileBytes,
+  parseLinkRecords,
+  parseMentions,
+  parseNullablePath,
+  parseNullableRelativePath,
+  parsePaneLayoutMessage,
+  parseSavedCopy,
+  parseVaultEntries,
+  parseVaultList,
+  parseVaultRestore,
+  parseWriteResult,
+} from "../shared/reader-protocol";
+
+/** 创建阅读器受限桥接；只开放已知命令与订阅，错误由对应 Promise 返回。 */
+export function createReaderApi(): ReaderApi {
+  return {
+    openExternal: async (url) =>
+      parseEmptyReply(await ipcRenderer.invoke("reader.links.openExternal", url)),
+    vaultOpen: async () => parseNullablePath(await ipcRenderer.invoke("reader.vault.open")),
+    vaultRestore: async () => parseVaultRestore(await ipcRenderer.invoke("reader.vault.restore")),
+    sessionSetCurrent: async (path) =>
+      parseEmptyReply(await ipcRenderer.invoke("reader.session.setCurrent", path)),
+    sessionGetPanes: async () =>
+      parsePaneLayoutMessage(await ipcRenderer.invoke("reader.session.getPanes")),
+    sessionSetPanes: async (panes) =>
+      parseEmptyReply(await ipcRenderer.invoke("reader.session.setPanes", panes)),
+    vaultClose: async () => parseEmptyReply(await ipcRenderer.invoke("reader.vault.close")),
+    vaultList: async () => parseVaultList(await ipcRenderer.invoke("reader.vault.list")),
+    vaultEntries: async () => parseVaultEntries(await ipcRenderer.invoke("reader.vault.entries")),
+    entryCreate: async (path, kind) =>
+      parseEntryOutcome(await ipcRenderer.invoke("reader.entry.create", path, kind)),
+    entryTrash: async (path) =>
+      parseEntryOutcome(await ipcRenderer.invoke("reader.entry.trash", path)),
+    entryReveal: async (path) =>
+      parseEmptyReply(await ipcRenderer.invoke("reader.entry.reveal", path)),
+    attachmentImport: async (root, from, name, bytes) =>
+      parseAttachmentReply(
+        await ipcRenderer.invoke("reader.attachment.import", root, from, name, bytes),
+      ),
+    fileRead: async (rel) => parseFileBytes(await ipcRenderer.invoke("reader.file.read", rel)),
+    fileSnapshot: async (rel) =>
+      parseFileSnapshot(await ipcRenderer.invoke("reader.file.snapshot", rel)),
+    filePreserveDraft: async (rel, source, expected, editor) =>
+      parseDraftReply(
+        await ipcRenderer.invoke("reader.file.preserveDraft", rel, source, expected, editor),
+      ),
+    fileWrite: async (rel, bytes, expected) =>
+      parseWriteResult(await ipcRenderer.invoke("reader.file.write", rel, bytes, expected)),
+    fileWriteCopy: async (rel, bytes, expected) =>
+      parseSavedCopy(await ipcRenderer.invoke("reader.file.writeCopy", rel, bytes, expected)),
+    linksResolve: async (from, raw, kind) =>
+      parseNullableRelativePath(await ipcRenderer.invoke("reader.links.resolve", from, raw, kind)),
+    indexLinksTo: async (path) =>
+      parseLinkRecords(await ipcRenderer.invoke("reader.index.linksTo", path)),
+    indexMentionsTo: async (path) =>
+      parseMentions(await ipcRenderer.invoke("reader.index.mentionsTo", path)),
+    indexLinksFrom: async (path) =>
+      parseLinkRecords(await ipcRenderer.invoke("reader.index.linksFrom", path)),
+    entryRename: async (from, to) =>
+      parseEntryOutcome(await ipcRenderer.invoke("reader.entry.rename", from, to)),
+    subscribeVaultChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: unknown): void => {
+        let event: VaultEvent;
+        try {
+          event = parseVaultEvent(value);
+        } catch (error) {
+          event = {
+            status: "index-error",
+            paths: [],
+            message: `无法识别库变更通知，请重新打开笔记库刷新：${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+        callback(event);
+      };
+      ipcRenderer.on("reader.vault.changed", listener);
+      return () => {
+        ipcRenderer.removeListener("reader.vault.changed", listener);
+      };
+    },
+  };
+}

@@ -44,6 +44,14 @@ fn assert_journal_cleared(state: &TempDir) {
         .query_row("SELECT count(*) FROM rename_steps", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0);
+    for table in ["rename_directories", "rename_created_directories"] {
+        let count: i64 = recovery(state)
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
 }
 
 #[test]
@@ -73,6 +81,36 @@ fn failure_to_commit_restores_the_deleted_source_and_every_backlink() {
     assert!(vault.rename("B.md", "C.md").is_err());
     assert_original(root.path());
     assert_journal_cleared(&state);
+}
+
+#[test]
+fn folder_failure_at_each_step_or_commit_restores_files_links_and_empty_directories() {
+    // 两个目标文件、一个入链更新、两个源文件删除，分别验证每个边界。
+    for failed_step in 0..=5 {
+        let root = TempDir::new().unwrap();
+        let state = TempDir::new().unwrap();
+        fs::create_dir_all(root.path().join("old/empty/deep")).unwrap();
+        fs::write(root.path().join("old/A.md"), b"[B](../B.md)\n").unwrap();
+        fs::write(root.path().join("old/.hidden"), b"hidden\0bytes").unwrap();
+        fs::write(root.path().join("B.md"), b"[A](old/A.md)\n").unwrap();
+        let vault = Vault::open(root.path(), state.path()).unwrap();
+        let trigger = if failed_step < 5 {
+            format!("CREATE TRIGGER reject_step BEFORE UPDATE OF started ON rename_steps WHEN NEW.ordinal = {failed_step} AND NEW.started = 1 BEGIN SELECT RAISE(ABORT, 'injected folder failure'); END;")
+        } else {
+            "CREATE TRIGGER reject_commit BEFORE UPDATE OF committed ON rename_operation BEGIN SELECT RAISE(ABORT, 'injected folder commit failure'); END;".to_string()
+        };
+        recovery(&state).execute_batch(&trigger).unwrap();
+        assert!(vault.rename("old", "parent/new").is_err());
+        assert_eq!(vault.read("old/A.md").unwrap(), b"[B](../B.md)\n");
+        assert_eq!(vault.read("old/.hidden").unwrap(), b"hidden\0bytes");
+        assert_eq!(vault.read("B.md").unwrap(), b"[A](old/A.md)\n");
+        assert!(root.path().join("old/empty/deep").is_dir());
+        assert!(!root.path().join("parent").exists());
+        assert_journal_cleared(&state);
+        drop(vault);
+        let reopened = Vault::open(root.path(), state.path()).unwrap();
+        assert_eq!(reopened.links_to("old/A.md").unwrap().len(), 1);
+    }
 }
 
 #[test]
@@ -214,6 +252,86 @@ fn recovery_never_touches_an_unstarted_destination() {
         b"someone else's file"
     );
     assert_journal_cleared(&state);
+}
+
+#[test]
+fn recovery_preserves_directories_that_were_only_planned() {
+    for legacy in [false, true] {
+        let (root, state, vault) = setup();
+        fs::create_dir_all(root.path().join("old/empty")).unwrap();
+        recovery(&state)
+            .execute_batch(
+                "INSERT INTO rename_operation VALUES (1, 'old', 'new', 0);
+             INSERT INTO rename_directories VALUES (0, 'new'), (1, 'new/empty');",
+            )
+            .unwrap();
+        drop(vault);
+        if legacy {
+            recovery(&state)
+                .execute_batch("DROP TABLE rename_created_directories;")
+                .unwrap();
+        }
+        // 计划落盘后尚未创建目录便退出；同名空目录可能由其他进程创建。
+        fs::create_dir_all(root.path().join("new/empty")).unwrap();
+
+        Vault::open(root.path(), state.path()).unwrap();
+        assert!(root.path().join("old/empty").is_dir());
+        assert!(root.path().join("new/empty").is_dir());
+        assert_journal_cleared(&state);
+    }
+}
+
+#[test]
+fn reopening_cleans_only_confirmed_directories_at_each_creation_boundary() {
+    for confirmed in 0..=2 {
+        let (root, state, vault) = setup();
+        fs::create_dir_all(root.path().join("old/empty")).unwrap();
+        recovery(&state)
+            .execute_batch(
+                "INSERT INTO rename_operation VALUES (1, 'old', 'new', 0);
+             INSERT INTO rename_directories VALUES (0, 'new'), (1, 'new/empty');",
+            )
+            .unwrap();
+        fs::create_dir_all(root.path().join("new/empty")).unwrap();
+        for directory in ["new", "new/empty"].iter().take(confirmed) {
+            recovery(&state)
+                .execute(
+                    "INSERT INTO rename_created_directories VALUES (?1)",
+                    [directory],
+                )
+                .unwrap();
+        }
+        drop(vault);
+
+        Vault::open(root.path(), state.path()).unwrap();
+        assert!(root.path().join("old/empty").is_dir());
+        // 创建与归属记录之间的中断允许留下空目录，但不得删除归属不明的目录。
+        assert_eq!(root.path().join("new/empty").is_dir(), confirmed < 2);
+        assert_eq!(root.path().join("new").is_dir(), confirmed < 2);
+        assert_journal_cleared(&state);
+    }
+}
+
+#[test]
+fn failure_to_record_directory_ownership_removes_the_new_empty_directory() {
+    for directory in ["new", "new/empty"] {
+        let (root, state, vault) = setup();
+        fs::create_dir_all(root.path().join("old/empty")).unwrap();
+        fs::write(root.path().join("old/note.md"), b"preserve source").unwrap();
+        recovery(&state).execute_batch(&format!(
+            "CREATE TRIGGER reject_directory BEFORE INSERT ON rename_created_directories
+             WHEN NEW.path = '{directory}' BEGIN SELECT RAISE(ABORT, 'directory record failure'); END;",
+        )).unwrap();
+
+        assert!(vault.rename("old", "new").is_err());
+        assert!(root.path().join("old/empty").is_dir());
+        assert_eq!(
+            fs::read(root.path().join("old/note.md")).unwrap(),
+            b"preserve source"
+        );
+        assert!(!root.path().join("new").exists());
+        assert_journal_cleared(&state);
+    }
 }
 
 #[test]

@@ -1,0 +1,167 @@
+import { dialog, ipcMain, shell, type BrowserWindow } from "electron";
+import { externalUrl } from "../shared/link-target";
+import type { PaneLayout } from "../shared/api";
+import { parseAttachmentRequest, type AttachmentReply } from "../shared/attachments";
+import { parseDraftRequest, type DraftReply } from "../shared/editor-recovery";
+import type { ReaderService } from "./service";
+import {
+  parseEntryKind,
+  parseLinkKindArgument,
+  parseLinkText,
+  parseNullableRelativePath,
+  parsePaneLayoutMessage,
+  parsePathArgument,
+  parseWriteRequest,
+} from "../shared/reader-protocol";
+
+/** 主进程仅能调用阅读器命令，不暴露外壳会话或任意线程消息。 */
+export type ReaderClient = {
+  call<C extends keyof ReaderService>(
+    command: C,
+    ...args: Parameters<ReaderService[C]>
+  ): Promise<ReturnType<ReaderService[C]>>;
+};
+
+/**
+ * 注册阅读器 IPC，文件操作与持久化均经工作线程执行。
+ * @param getWindow 目录选择框的父窗口。
+ * @param core 注入的阅读器命令客户端。
+ * @throws IPC 重复注册或单次命令失败时由 Electron 传播错误。
+ */
+export function registerReaderIpc(getWindow: () => BrowserWindow | null, core: ReaderClient): void {
+  ipcMain.handle("reader.links.openExternal", (_event, url: unknown) =>
+    shell.openExternal(externalUrl(url)),
+  );
+  ipcMain.handle("reader.vault.open", async () => {
+    const window = getWindow();
+    const result = window
+      ? await dialog.showOpenDialog(window, { properties: ["openDirectory"] })
+      : await dialog.showOpenDialog({ properties: ["openDirectory"] });
+    const root = result.filePaths[0];
+    if (result.canceled || root === undefined) {
+      return null;
+    }
+    return core.call("vaultOpen", root);
+  });
+
+  ipcMain.handle("reader.vault.restore", () => core.call("vaultRestore"));
+
+  ipcMain.handle("reader.session.setCurrent", (_event, path: unknown) => {
+    const currentPath = parseNullableRelativePath(path);
+    return core.call("readerSessionPatch", { currentPath });
+  });
+
+  ipcMain.handle("reader.session.getPanes", async (): Promise<PaneLayout> => {
+    const session = await core.call("readerSessionLoad");
+    return { filesCollapsed: session.filesCollapsed, leftWidth: session.leftWidth };
+  });
+
+  ipcMain.handle("reader.session.setPanes", (_event, panes: unknown) => {
+    const parsed = parsePaneLayoutMessage(panes);
+    return core.call("readerSessionPatch", parsed);
+  });
+
+  ipcMain.handle("reader.vault.close", () => core.call("vaultClose"));
+  ipcMain.handle("reader.vault.list", () => core.call("vaultList"));
+  ipcMain.handle("reader.vault.entries", () => core.call("vaultEntries"));
+  ipcMain.handle("reader.entry.create", (_event, path: unknown, kind: unknown) =>
+    core.call("entryCreate", parsePathArgument(path), parseEntryKind(kind)),
+  );
+  ipcMain.handle("reader.entry.trash", (_event, path: unknown) =>
+    core.call("entryTrash", parsePathArgument(path)),
+  );
+  ipcMain.handle(
+    "reader.attachment.import",
+    async (
+      _event,
+      root: unknown,
+      from: unknown,
+      name: unknown,
+      bytes: unknown,
+    ): Promise<AttachmentReply> => {
+      try {
+        const request = parseAttachmentRequest(root, from, name, bytes);
+        const attachment = await core.call(
+          "attachmentImport",
+          request.root,
+          request.from,
+          request.name,
+          request.bytes,
+        );
+        return { status: "imported", attachment };
+      } catch (error) {
+        return {
+          status: "failed",
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
+  ipcMain.handle("reader.entry.reveal", async (_event, path: unknown) => {
+    shell.showItemInFolder(await core.call("entryPath", parsePathArgument(path)));
+  });
+  ipcMain.handle("reader.file.read", (_event, rel: unknown) =>
+    core.call("fileRead", parsePathArgument(rel)),
+  );
+  ipcMain.handle("reader.file.snapshot", (_event, rel: unknown) =>
+    core.call("fileSnapshot", parsePathArgument(rel)),
+  );
+  ipcMain.handle(
+    "reader.file.preserveDraft",
+    async (
+      _event,
+      rel: unknown,
+      source: unknown,
+      expected: unknown,
+      editor: unknown,
+    ): Promise<DraftReply> => {
+      try {
+        const request = parseDraftRequest(rel, source, expected, editor);
+        await core.call(
+          "filePreserveDraft",
+          request.rel,
+          request.source,
+          request.expected,
+          request.editor,
+        );
+        return { status: "preserved" };
+      } catch (error) {
+        return {
+          status: "failed",
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
+  ipcMain.handle("reader.file.write", (_event, rel: unknown, bytes: unknown, expected: unknown) => {
+    const request = parseWriteRequest(rel, bytes, expected);
+    return core.call("fileWrite", request.rel, request.bytes, request.expected);
+  });
+  ipcMain.handle(
+    "reader.file.writeCopy",
+    (_event, rel: unknown, bytes: unknown, expected: unknown) => {
+      const request = parseWriteRequest(rel, bytes, expected);
+      return core.call("fileWriteCopy", request.rel, request.bytes, request.expected);
+    },
+  );
+  ipcMain.handle("reader.links.resolve", (_event, from: unknown, raw: unknown, kind: unknown) =>
+    core.call(
+      "linksResolve",
+      parsePathArgument(from),
+      parseLinkText(raw),
+      parseLinkKindArgument(kind),
+    ),
+  );
+  ipcMain.handle("reader.index.linksTo", (_event, path: unknown) =>
+    core.call("indexLinksTo", parsePathArgument(path)),
+  );
+  ipcMain.handle("reader.index.linksFrom", (_event, path: unknown) =>
+    core.call("indexLinksFrom", parsePathArgument(path)),
+  );
+  ipcMain.handle("reader.index.mentionsTo", (_event, path: unknown) =>
+    core.call("indexMentionsTo", parsePathArgument(path)),
+  );
+  ipcMain.handle("reader.entry.rename", (_event, from: unknown, to: unknown) =>
+    core.call("entryRename", parsePathArgument(from), parsePathArgument(to)),
+  );
+}

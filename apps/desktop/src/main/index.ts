@@ -1,10 +1,11 @@
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
-import { BrowserWindow, app, dialog, screen } from "electron";
+import { BrowserWindow, app, dialog, nativeTheme, screen } from "electron";
 import { createCloseGate, onCloseAttempt, resetCloseGate, type CloseGate } from "./close-gate";
 import { CoreClient } from "./core-client";
 import { registerIpc } from "./ipc";
 import type { WindowSession } from "./session";
+import { installApplicationMenu, updateHistoryMenu } from "./menu";
 
 let mainWindow: BrowserWindow | null = null;
 const closeGate: CloseGate = createCloseGate();
@@ -25,8 +26,8 @@ function clampWindow(stored: WindowSession): Electron.Rectangle {
     height: stored.height,
   });
   const area = display.workArea;
-  const width = Math.min(Math.max(Math.round(stored.width), 400), area.width);
-  const height = Math.min(Math.max(Math.round(stored.height), 300), area.height);
+  const width = Math.min(Math.max(Math.round(stored.width), 640), area.width);
+  const height = Math.min(Math.max(Math.round(stored.height), 480), area.height);
   let x = Math.round(stored.x);
   let y = Math.round(stored.y);
   if (x + width < area.x || x > area.x + area.width) {
@@ -62,7 +63,9 @@ function createWindow(client: CoreClient): void {
   const bounds = stored === null ? null : clampWindow(stored);
   mainWindow = new BrowserWindow({
     ...(bounds ?? { width: 1100, height: 720 }),
-    backgroundColor: "#ffffff",
+    minWidth: 640,
+    minHeight: 480,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#202022" : "#ffffff",
     autoHideMenuBar: true,
     webPreferences: {
       // 沙箱 preload 必须是 CJS；electron-vite 在 format: "cjs" 时产出 index.cjs。
@@ -75,6 +78,11 @@ function createWindow(client: CoreClient): void {
   if (stored !== null && stored.maximized) {
     mainWindow.maximize();
   }
+
+  mainWindow.webContents.on("did-start-navigation", (_event, _url, inPlace, isMainFrame) => {
+    if (isMainFrame && !inPlace) updateHistoryMenu();
+  });
+  mainWindow.webContents.on("render-process-gone", () => updateHistoryMenu());
 
   if (process.env["ELECTRON_RENDERER_URL"]) {
     void mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
@@ -101,6 +109,7 @@ function createWindow(client: CoreClient): void {
   });
   mainWindow.on("closed", () => {
     mainWindow = null;
+    updateHistoryMenu();
   });
 }
 
@@ -109,20 +118,25 @@ app.whenReady().then(async () => {
     new Worker(new URL("./core-worker.js", import.meta.url), {
       workerData: app.getPath("userData"),
     }),
-    () => {
+    (event) => {
       if (mainWindow !== null && !mainWindow.webContents.isDestroyed()) {
-        mainWindow.webContents.send("vault.changed");
+        mainWindow.webContents.send("reader.vault.changed", event);
       }
     },
   );
   core = client;
   registerIpc(() => mainWindow, closeGate, client);
   try {
-    storedWindow = (await client.call("sessionLoad")).window;
+    const session = await client.call("sessionLoad");
+    storedWindow = session.window;
+    nativeTheme.themeSource = session.appearance;
   } catch (error) {
     console.error("恢复窗口状态失败", error);
   }
   if (quitState !== "running") return;
+  installApplicationMenu((command) => {
+    if (rendererCanFlush(mainWindow)) mainWindow?.webContents.send("app.command", command);
+  });
   createWindow(client);
   app.on("activate", () => {
     if (quitState === "running" && BrowserWindow.getAllWindows().length === 0) {

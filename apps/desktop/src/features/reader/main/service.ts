@@ -1,0 +1,285 @@
+import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import type * as NativeModule from "@nous/native";
+import type {
+  FileSnapshot,
+  LinkKind,
+  LinkRecord,
+  Mentions,
+  RenameOutcome,
+  SavedCopy,
+  VaultRestore,
+  WriteResult,
+  VaultEntry,
+  VaultEvent,
+} from "../shared/api";
+import { parseVaultEvent } from "../shared/api";
+import { parseAttachmentRequest, parseImportedAttachment } from "../shared/attachments";
+import { parseDraftRequest } from "../shared/editor-recovery";
+import type { ReaderSession, ReaderSessionStore } from "../shared/session";
+import {
+  parseFileBytes,
+  parseLinkRecords,
+  parseMentions,
+  parseWriteResult,
+  parseSavedCopy,
+} from "../shared/reader-protocol";
+
+const require = createRequire(import.meta.url);
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function mapLink(link: NativeModule.JsLinkRecord) {
+  return {
+    fromPath: link.fromPath,
+    toRaw: link.toRaw,
+    toPath: link.toPath ?? null,
+    kind: link.kind,
+    startByte: link.startByte,
+    endByte: link.endByte,
+  };
+}
+
+function mapMention(mention: NativeModule.JsMentionRecord) {
+  return {
+    fromPath: mention.fromPath,
+    fromTitle: mention.fromTitle,
+    mtime: mention.mtime,
+    startByte: mention.startByte,
+    endByte: mention.endByte,
+    snippet: mention.snippet,
+    kind: mention.kind,
+    linkKind: mention.linkKind ?? null,
+    toRaw: mention.toRaw,
+  };
+}
+
+function mapMentions(value: NativeModule.JsMentions): Mentions {
+  return parseMentions({
+    linked: value.linked.map(mapMention),
+    unlinked: value.unlinked.map(mapMention),
+  });
+}
+
+/**
+ * 创建仅由工作线程使用的同步内核服务，所有命令共用同一库与会话。
+ *
+ * @param userData 应用数据目录，不能由渲染进程指定。
+ * @param onChanged 当前库的索引刷新通知；关闭或切库后丢弃旧回调。
+ * @param sessions 只暴露阅读器状态的存储接口，应用窗口和主题不可经此写入。
+ * @returns 按消息顺序调用的命令集合；磁盘与内核错误由调用方转发。
+ * 返回的字节均为独占副本，供工作线程转移；不得返回原生 Buffer 或复用缓冲区。
+ * @throws 原生模块无法加载时抛出加载错误；不创建部分可用的服务。
+ */
+export function createReaderService(
+  userData: string,
+  onChanged: (event: VaultEvent) => void,
+  sessions: ReaderSessionStore,
+) {
+  const native = require("@nous/native") as typeof NativeModule;
+  let activeVault: object | null = null;
+
+  function openVault(root: string): void {
+    const vault = {};
+    const hash = createHash("sha256").update(root).digest("hex").slice(0, 16);
+    native.vaultOpen(root, join(userData, "vaults", hash), (event: unknown) => {
+      if (activeVault === vault) {
+        try {
+          onChanged(parseVaultEvent(event));
+        } catch (error) {
+          onChanged({ status: "index-error", paths: [], message: String(error) });
+        }
+      }
+    });
+    // 打开失败时保留原库及其回调归属。
+    activeVault = vault;
+  }
+
+  function rememberEntryChange(
+    warning: string | null,
+    mapPath: (path: string) => string | null,
+  ): RenameOutcome {
+    try {
+      const session = sessions.load();
+      if (session.currentPath !== null) {
+        const currentPath = mapPath(session.currentPath);
+        if (currentPath !== session.currentPath) sessions.save({ ...session, currentPath });
+      }
+    } catch (error) {
+      warning = [warning, `文件操作已完成，会话更新失败：${String(error)}`]
+        .filter(Boolean)
+        .join("；");
+    }
+    onChanged({ status: "changed", paths: [], healthy: false });
+    return { warning };
+  }
+
+  return {
+    vaultOpen(root: string): string {
+      const previous = sessions.load();
+      // 先确认会话可写，避免内核已切库、界面却因会话写入失败而留在原库。
+      sessions.save({ ...previous, vaultRoot: root, currentPath: null });
+      try {
+        openVault(root);
+      } catch (error) {
+        try {
+          sessions.save(previous);
+        } catch (restoreError) {
+          throw new Error(`${String(error)}；恢复上次会话失败：${String(restoreError)}`);
+        }
+        throw error;
+      }
+      return root;
+    },
+    vaultRestore(): VaultRestore | null {
+      const stored = sessions.load();
+      const root = stored.vaultRoot;
+      if (root === null || !isDirectory(root)) return null;
+      openVault(root);
+      return { root, currentPath: stored.currentPath };
+    },
+    vaultClose(): void {
+      native.vaultClose();
+      activeVault = null;
+    },
+    vaultList(): string[] {
+      return native.vaultList();
+    },
+    vaultEntries(): VaultEntry[] {
+      return native.vaultEntries().map((entry) => {
+        if (entry.kind !== "file" && entry.kind !== "directory") throw new Error("未知条目类型");
+        return {
+          path: entry.path,
+          kind: entry.kind,
+          ...(entry.recoveryOnly ? { recoveryOnly: true as const } : {}),
+        };
+      });
+    },
+    entryCreate(path: string, kind: VaultEntry["kind"]): RenameOutcome {
+      return rememberEntryChange(
+        native.entryCreate(path, kind).warning ?? null,
+        (current) => current,
+      );
+    },
+    entryTrash(path: string): RenameOutcome {
+      return rememberEntryChange(native.entryTrash(path).warning ?? null, (current) =>
+        current === path || current.startsWith(`${path}/`) ? null : current,
+      );
+    },
+    entryPath(path: string): string {
+      return native.entryPath(path);
+    },
+    attachmentImport(root: string, from: string, name: string, bytes: Uint8Array) {
+      const request = parseAttachmentRequest(root, from, name, bytes);
+      if (activeVault === null || sessions.load().vaultRoot !== request.root)
+        throw new Error("笔记库已切换，请回到原笔记重新插入附件");
+      const result = native.attachmentImport(
+        request.from,
+        request.name,
+        Buffer.from(request.bytes),
+      );
+      const imported = parseImportedAttachment({
+        path: result.path,
+        warning: result.warning ?? null,
+      });
+      onChanged({ status: "changed", paths: [imported.path], healthy: imported.warning === null });
+      return imported;
+    },
+    readerSessionLoad(): ReaderSession {
+      return sessions.load();
+    },
+    readerSessionPatch(patch: Partial<ReaderSession>): void {
+      sessions.save({ ...sessions.load(), ...patch });
+    },
+    fileRead(rel: string): Uint8Array {
+      return new Uint8Array(parseFileBytes(native.fileRead(rel)));
+    },
+    fileSnapshot(rel: string): FileSnapshot {
+      const snapshot = native.fileSnapshot(rel);
+      return {
+        disk: snapshot.disk == null ? null : new Uint8Array(parseFileBytes(snapshot.disk)),
+        ...(snapshot.diskError == null ? {} : { diskError: snapshot.diskError }),
+        draft:
+          snapshot.draft == null
+            ? null
+            : {
+                bytes: new Uint8Array(parseFileBytes(snapshot.draft.bytes)),
+                base:
+                  snapshot.draft.base == null
+                    ? null
+                    : new Uint8Array(parseFileBytes(snapshot.draft.base)),
+                ...(snapshot.draft.editor == null ? {} : { editor: snapshot.draft.editor }),
+              },
+      };
+    },
+    filePreserveDraft(
+      rel: string,
+      source: Uint8Array,
+      expected: Uint8Array | null,
+      editor: string,
+    ): void {
+      const request = parseDraftRequest(rel, source, expected, editor);
+      native.filePreserveDraft(
+        request.rel,
+        Buffer.from(request.source),
+        request.expected === null ? null : Buffer.from(request.expected),
+        request.editor,
+      );
+    },
+    fileWrite(rel: string, bytes: Uint8Array, expected: Uint8Array | null): WriteResult {
+      const result = native.fileWrite(
+        rel,
+        Buffer.from(bytes),
+        expected === null ? null : Buffer.from(expected),
+      );
+      if (result.status === "conflict") {
+        return parseWriteResult({
+          status: "conflict",
+          disk: result.disk == null ? null : new Uint8Array(parseFileBytes(result.disk)),
+        });
+      }
+      return parseWriteResult({ status: result.status, warning: result.warning ?? null });
+    },
+    fileWriteCopy(rel: string, bytes: Uint8Array, expected: Uint8Array | null): SavedCopy {
+      const copy = native.fileWriteCopy(
+        rel,
+        Buffer.from(bytes),
+        expected === null ? null : Buffer.from(expected),
+      );
+      return parseSavedCopy({ path: copy.path, warning: copy.warning ?? null });
+    },
+    linksResolve(from: string, raw: string, kind: LinkKind): string | null {
+      return native.linksResolve(from, raw, kind) ?? null;
+    },
+    indexLinksTo(path: string): LinkRecord[] {
+      return parseLinkRecords(native.indexLinksTo(path).map(mapLink));
+    },
+    indexLinksFrom(path: string): LinkRecord[] {
+      return parseLinkRecords(native.indexLinksFrom(path).map(mapLink));
+    },
+    indexMentionsTo(path: string): Mentions {
+      return mapMentions(native.indexMentionsTo(path));
+    },
+    entryRename(from: string, to: string): RenameOutcome {
+      const result = native.entryRename(from, to);
+      return rememberEntryChange(result.warning ?? null, (current) =>
+        current === from
+          ? to
+          : current.startsWith(`${from}/`)
+            ? `${to}${current.slice(from.length)}`
+            : current,
+      );
+    },
+  };
+}
+
+/** 工作线程协议直接使用服务签名，避免参数与返回值各维护一份。 */
+export type ReaderService = ReturnType<typeof createReaderService>;

@@ -1,6 +1,6 @@
 //! 监视库目录变更并在防抖后回调。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -29,13 +29,29 @@ pub fn start_watch<F>(
     on_change: F,
 ) -> Result<WatchHandle, Error>
 where
-    F: Fn() + Send + 'static,
+    F: Fn(Result<Vec<PathBuf>, String>) + Send + 'static,
 {
     let root = root.as_ref();
     let mut debouncer = new_debouncer(debounce, None, move |result: DebounceEventResult| {
-        if result.is_ok() {
-            on_change();
-        }
+        on_change(
+            result
+                .map(|events| {
+                    let mut paths: Vec<_> = events
+                        .into_iter()
+                        .flat_map(|event| event.event.paths)
+                        .collect();
+                    paths.sort();
+                    paths.dedup();
+                    paths
+                })
+                .map_err(|errors| {
+                    errors
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("；")
+                }),
+        );
     })
     .map_err(|err| Error::Io(std::io::Error::other(err)))?;
     debouncer

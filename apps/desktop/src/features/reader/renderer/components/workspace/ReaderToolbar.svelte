@@ -1,0 +1,309 @@
+<script lang="ts">
+  import type { Snippet } from "svelte";
+  import OutlineTree from "../navigation/OutlineTree.svelte";
+  import WorkspaceFeedback from "./WorkspaceFeedback.svelte";
+  import type { ReaderWorkspaceController } from "../../state/workspace.svelte";
+
+  let {
+    workspace,
+    filesCollapsed,
+    onToggleFiles,
+    onRename,
+    onDocumentAction,
+    applicationMenu,
+  }: {
+    workspace: ReaderWorkspaceController;
+    filesCollapsed: boolean;
+    onToggleFiles: () => void;
+    onRename: () => void;
+    onDocumentAction: () => void;
+    applicationMenu: Snippet;
+  } = $props();
+  const doc = $derived(workspace.document);
+  const navigation = $derived(workspace.navigation);
+  let outlinePopover: HTMLElement | undefined = $state();
+  let filesToggle: HTMLButtonElement;
+  const saveStatus = $derived(
+    workspace.copying
+      ? "正在保存副本…"
+      : doc.saving
+        ? "正在保存…"
+        : doc.conflict !== null
+          ? "存在保存冲突"
+          : doc.saveError !== null
+            ? "保存失败"
+            : doc.dirty
+              ? "未保存"
+              : "已保存",
+  );
+
+  function basename(path: string): string {
+    return path.slice(path.lastIndexOf("/") + 1);
+  }
+  function jumpOutline(pos: number): void {
+    outlinePopover?.hidePopover();
+    navigation.jumpOutline(pos);
+  }
+  /** 窄窗口关闭文件栏后，焦点回到稳定可见的入口，避免落在隐藏控件上。 */
+  export function focusFilesToggle(): void {
+    filesToggle.focus();
+  }
+</script>
+
+<header class="toolbar">
+  <button
+    bind:this={filesToggle}
+    type="button"
+    class="reader-button icon-button"
+    aria-label="显示或隐藏文件栏"
+    aria-pressed={!filesCollapsed}
+    onclick={onToggleFiles}
+    title="显示或隐藏文件栏"
+  >
+    <svg class="reader-icon" viewBox="0 0 24 24" aria-hidden="true"
+      ><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M9 5v14" /></svg
+    >
+  </button>
+  <button
+    type="button"
+    class="reader-button library-button"
+    popovertarget="library-menu"
+    disabled={workspace.switching || workspace.copying}
+    aria-label="切换笔记库"
+  >
+    {workspace.vaultRoot === null ? "Nous" : basename(workspace.vaultRoot)}
+    <svg class="reader-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4" /></svg>
+  </button>
+  <div class="document-heading">
+    <span class="document-name" title={doc.path ?? undefined}
+      >{doc.path === null ? "" : basename(doc.path)}</span
+    >
+    {#if doc.path !== null}
+      <span
+        class="save-status"
+        class:quiet={!doc.dirty &&
+          !doc.saving &&
+          !workspace.copying &&
+          doc.saveError === null &&
+          doc.conflict === null}
+        role="status">{doc.canEdit ? saveStatus : "只读预览"}</span
+      >
+    {/if}
+  </div>
+  <WorkspaceFeedback {workspace} />
+  {#if doc.content?.kind === "markdown"}
+    <button
+      class="reader-button format-button"
+      type="button"
+      popovertarget="editor-formatting"
+      aria-label="文本格式"
+      title="文本格式"
+      onclick={onDocumentAction}
+      onmousedown={(event) => event.preventDefault()}
+      disabled={workspace.switching || workspace.copying}>Aa</button
+    >
+  {/if}
+  {#if doc.canEdit}
+    <button
+      class="reader-button icon-button"
+      type="button"
+      aria-label="文内查找"
+      title="文内查找"
+      onclick={() => {
+        onDocumentAction();
+        navigation.openSearch();
+      }}
+      disabled={workspace.switching || workspace.copying}
+      ><svg class="reader-icon" viewBox="0 0 24 24" aria-hidden="true"
+        ><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></svg
+      ></button
+    >
+  {/if}
+  {#if navigation.hasOutline}
+    <button
+      class="reader-button icon-button"
+      type="button"
+      popovertarget="outline-panel"
+      aria-label="目录"
+      title="目录"
+      onclick={onDocumentAction}
+      disabled={workspace.switching || workspace.copying}
+    >
+      <svg class="reader-icon" viewBox="0 0 24 24" aria-hidden="true"
+        ><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01" /></svg
+      >
+    </button>
+  {/if}
+  {#if doc.path !== null}
+    <button
+      type="button"
+      class="reader-button icon-button"
+      popovertarget="note-menu"
+      aria-label="笔记操作"
+      disabled={workspace.switching || workspace.copying}
+      title="笔记操作"
+      onclick={onDocumentAction}
+    >
+      <svg class="reader-icon" viewBox="0 0 24 24" aria-hidden="true"
+        ><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle
+          cx="19"
+          cy="12"
+          r="1"
+        /></svg
+      >
+    </button>
+  {/if}
+</header>
+
+<div id="library-menu" popover="auto" class="reader-popover action-popover library-menu">
+  <button
+    class="reader-button"
+    type="button"
+    popovertarget="library-menu"
+    popovertargetaction="hide"
+    onclick={() => void workspace.openVault()}
+    disabled={workspace.switching || workspace.copying}>打开笔记库…</button
+  >
+  {@render applicationMenu()}
+</div>
+<div id="note-menu" popover="auto" class="reader-popover action-popover note-menu">
+  <button
+    class="reader-button"
+    type="button"
+    popovertarget="note-menu"
+    popovertargetaction="hide"
+    onclick={onRename}
+    disabled={doc.path === null || workspace.switching || workspace.copying}>重命名…</button
+  >
+  <button
+    class="reader-button"
+    type="button"
+    popovertarget="note-menu"
+    popovertargetaction="hide"
+    onclick={workspace.requestSave}
+    disabled={!doc.canEdit || workspace.switching || workspace.copying || doc.saving}>保存</button
+  >
+</div>
+<div
+  id="outline-panel"
+  popover="auto"
+  class="reader-popover outline-popover"
+  bind:this={outlinePopover}
+>
+  <div class="popover-heading">本文目录</div>
+  <nav aria-label="文档目录">
+    <OutlineTree
+      nodes={navigation.outlineTree}
+      collapsed={navigation.collapsedKeys}
+      onToggle={navigation.toggleOutline}
+      onJump={jumpOutline}
+    />
+  </nav>
+</div>
+
+<style>
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    height: 3.5rem;
+    flex-shrink: 0;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--sidebar);
+  }
+  .toolbar button {
+    border-color: transparent;
+    background: transparent;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .toolbar button[aria-pressed="true"] {
+    background: var(--selected);
+  }
+  .toolbar .format-button {
+    font-weight: 500;
+    font-size: 1.05rem;
+    padding: 0.3rem 0.45rem;
+  }
+  .toolbar .icon-button {
+    padding: 0.4rem;
+  }
+  .library-button {
+    max-width: 12rem;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .document-heading {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.7rem;
+  }
+  .document-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+  .save-status {
+    white-space: nowrap;
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+  .quiet {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .library-menu {
+    inset-inline-start: 1rem;
+    inset-inline-end: auto;
+  }
+  .action-popover {
+    width: 12rem;
+  }
+  .action-popover button {
+    display: block;
+    width: 100%;
+    border-color: transparent;
+    background: transparent;
+    text-align: left;
+    padding: 0.5rem 0.65rem;
+  }
+  .outline-popover {
+    width: 17rem;
+    max-height: min(65vh, 32rem);
+    overflow: auto;
+    padding: 0.75rem;
+  }
+  .popover-heading {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin: 0.25rem 0.35rem 0.6rem;
+  }
+  @media (max-width: 640px) {
+    .toolbar {
+      padding: 0.5rem;
+      gap: 0.2rem;
+    }
+    .library-button {
+      max-width: 7rem;
+    }
+    .document-name {
+      font-size: 0.8rem;
+    }
+    .document-heading {
+      flex-direction: column;
+      gap: 0;
+    }
+  }
+</style>

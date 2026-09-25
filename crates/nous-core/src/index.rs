@@ -29,6 +29,11 @@ pub fn open_connection(path: &std::path::Path) -> Result<Connection, Error> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    let tables: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('files', 'links')",
+        [],
+        |row| row.get(0),
+    )?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS files (
@@ -51,11 +56,15 @@ pub fn open_connection(path: &std::path::Path) -> Result<Connection, Error> {
         CREATE INDEX IF NOT EXISTS links_to_path ON links(to_path);
         ",
     )?;
+    if tables != 2 {
+        // 派生表被移除后，新建空表必须同时失效旧扫描版本；恢复库始终独立保留。
+        conn.pragma_update(None, "user_version", 0)?;
+    }
     Ok(conn)
 }
 
 /// 扫描器/解析输出格式。区间或目标解析变了必须加一，已打开的库才会重扫而不是复用旧行。
-pub(crate) const SCAN_VERSION: i32 = 5;
+pub(crate) const SCAN_VERSION: i32 = 6;
 
 /// 当前索引里记录的扫描器版本；从未写过则为 0。
 pub(crate) fn scan_version(conn: &Connection) -> Result<i32, Error> {

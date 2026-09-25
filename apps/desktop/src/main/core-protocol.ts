@@ -1,4 +1,5 @@
 import type { CoreService } from "./core-service";
+import type { VaultEvent } from "../features/reader/shared/api";
 
 /** 只允许主进程提交已知内核命令。 */
 export type CoreCommand = keyof CoreService;
@@ -20,5 +21,5 @@ export type CoreInput = CoreRequest | { type: "shutdown" };
 export type CoreOutput =
   | { type: "result"; id: number; value: unknown }
   | { type: "error"; id: number; message: string }
-  | { type: "changed" }
+  | { type: "changed"; event: VaultEvent }
   | { type: "stopped" };

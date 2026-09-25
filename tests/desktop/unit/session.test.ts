@@ -3,164 +3,85 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
 import {
-  DEFAULT_LEFT_WIDTH,
-  DEFAULT_RIGHT_WIDTH,
   emptySession,
   loadSession,
-  parsePaneLayout,
   parseSession,
   patchSession,
   serializeSession,
 } from "../../../apps/desktop/src/main/session";
+import { emptyReaderSession } from "@reader/shared/session";
 
-function temporaryDirectory(): string {
+function temporaryFile(): string {
   const dir = mkdtempSync(join(tmpdir(), "nous-session-"));
   onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
+  return join(dir, "session.json");
 }
 
-describe("desktop session", () => {
-  it("parses a complete session object", () => {
-    const parsed = parseSession(
-      JSON.stringify({
-        vaultRoot: "/notes",
-        currentPath: "a.md",
-        window: { x: 10, y: 20, width: 800, height: 600, maximized: false },
-        filesCollapsed: true,
-        leftWidth: 200,
-        rightCollapsed: false,
-        rightWidth: 320,
-        rightSplit: true,
-        rightSlots: [
-          { viewId: "backlinks", pinnedPath: "a.md" },
-          { viewId: "outline", pinnedPath: null },
-        ],
-        backlinksInDocument: true,
-      }),
-    );
-    expect(parsed).toEqual({
-      vaultRoot: "/notes",
-      currentPath: "a.md",
-      window: { x: 10, y: 20, width: 800, height: 600, maximized: false },
-      filesCollapsed: true,
-      leftWidth: 200,
-      rightCollapsed: false,
-      rightWidth: 320,
-      rightSplit: true,
-      rightSlots: [
-        { viewId: "backlinks", pinnedPath: "a.md" },
-        { viewId: "outline", pinnedPath: null },
-      ],
-      backlinksInDocument: true,
+describe("应用与阅读器会话", () => {
+  it("迁移旧版平铺字段，保留主题、窗口、笔记库与文件栏，忽略旧分栏配置", () => {
+    const window = { x: 10, y: 20, width: 800, height: 600, maximized: false };
+    expect(
+      parseSession(
+        JSON.stringify({
+          appearance: "dark",
+          window,
+          vaultRoot: "/notes",
+          currentPath: "a.md",
+          leftWidth: 230,
+          filesCollapsed: true,
+          rightSplit: true,
+          rightSlots: [{ viewId: "backlinks", pinnedPath: "a.md" }],
+        }),
+      ),
+    ).toEqual({
+      appearance: "dark",
+      window,
+      reader: { vaultRoot: "/notes", currentPath: "a.md", leftWidth: 230, filesCollapsed: true },
     });
   });
-
-  it("maps old outlineCollapsed onto rightCollapsed and fills sidebar defaults", () => {
-    const parsed = parseSession(
-      JSON.stringify({
-        vaultRoot: "/notes",
-        currentPath: "a.md",
-        window: null,
-        filesCollapsed: false,
-        outlineCollapsed: true,
-      }),
-    );
-    expect(parsed?.rightCollapsed).toBe(true);
-    expect(parsed?.leftWidth).toBe(DEFAULT_LEFT_WIDTH);
-    expect(parsed?.rightWidth).toBe(DEFAULT_RIGHT_WIDTH);
-    expect(parsed?.rightSplit).toBe(false);
-    expect(parsed?.rightSlots).toEqual([{ viewId: "backlinks", pinnedPath: null }]);
-    expect(parsed?.backlinksInDocument).toBe(false);
+  it("新命名空间优先，旧平铺字段不能覆盖阅读器状态", () => {
+    const session = {
+      ...emptySession,
+      appearance: "light" as const,
+      reader: { ...emptyReaderSession, vaultRoot: "/new", currentPath: "new.md" },
+    };
+    expect(
+      parseSession(JSON.stringify({ ...session, vaultRoot: "/old", currentPath: "old.md" })),
+    ).toEqual(session);
   });
-
-  it("defaults missing pane flags to expanded", () => {
-    const parsed = parseSession(
-      JSON.stringify({
-        vaultRoot: "/notes",
-        currentPath: "a.md",
-        window: null,
-      }),
-    );
-    expect(parsed?.filesCollapsed).toBe(false);
-    expect(parsed?.rightCollapsed).toBe(false);
+  it("缺失或非法外观与阅读器状态回退默认值", () => {
+    for (const appearance of [undefined, null, "sepia", {}, 1]) {
+      expect(parseSession(JSON.stringify({ appearance }))?.appearance).toBe("system");
+    }
+    expect(parseSession(JSON.stringify({ reader: null }))).toEqual(emptySession);
   });
-
-  it("rejects invalid json and non-objects", () => {
-    expect(parseSession("{")).toBeNull();
-    expect(parseSession("[]")).toBeNull();
-    expect(parseSession("null")).toBeNull();
+  it("拒绝无效 JSON 和非对象根值", () => {
+    for (const value of ["{", "[]", "null"]) expect(parseSession(value)).toBeNull();
   });
-
-  it("roundtrips through a session file and patches fields", () => {
-    const dir = temporaryDirectory();
-    const file = join(dir, "session.json");
-    writeFileSync(file, serializeSession(emptySession));
-    expect(loadSession(file).vaultRoot).toBeNull();
-    const next = patchSession(file, { vaultRoot: "/a", currentPath: "x.md" });
-    expect(next.vaultRoot).toBe("/a");
-    expect(next.currentPath).toBe("x.md");
-    expect(next.rightSlots).toEqual([{ viewId: "backlinks", pinnedPath: null }]);
-    expect(loadSession(file).currentPath).toBe("x.md");
+  it("应用设置与阅读器状态可以独立持久化，互不覆盖", () => {
+    const file = temporaryFile();
+    const reader = { ...emptyReaderSession, vaultRoot: "/notes", currentPath: "a.md" };
+    patchSession(file, { reader });
+    for (const appearance of ["system", "light", "dark"] as const) {
+      patchSession(file, { appearance });
+      expect(loadSession(file).reader).toEqual(reader);
+      patchSession(file, { reader: { ...reader, leftWidth: 240 } });
+      expect(loadSession(file).appearance).toBe(appearance);
+      patchSession(file, { reader });
+    }
   });
-
-  it("returns empty session when the file is missing", () => {
-    const dir = temporaryDirectory();
-    expect(loadSession(join(dir, "missing.json"))).toEqual(emptySession);
-  });
-
-  it("parses pane layout without reading vaultRoot from the payload", () => {
-    const panes = parsePaneLayout({
-      vaultRoot: "/evil",
-      currentPath: "stolen.md",
-      filesCollapsed: true,
-      leftWidth: 200,
-      rightCollapsed: true,
-      rightWidth: 320,
-      rightSplit: false,
-      rightSlots: [{ viewId: "outline", pinnedPath: "a.md" }],
-      backlinksInDocument: true,
-    });
-    expect(panes).toEqual({
-      filesCollapsed: true,
-      leftWidth: 200,
-      rightCollapsed: true,
-      rightWidth: 320,
-      rightSplit: false,
-      rightSlots: [{ viewId: "outline", pinnedPath: "a.md" }],
-      backlinksInDocument: true,
-    });
-    expect(panes).not.toHaveProperty("vaultRoot");
-  });
-
-  it("patching panes leaves vaultRoot and currentPath untouched", () => {
-    const dir = temporaryDirectory();
-    const file = join(dir, "session.json");
+  it("会话写回只保留新结构，重启仍能恢复迁移后的状态", () => {
+    const file = temporaryFile();
     writeFileSync(
       file,
-      serializeSession({
-        ...emptySession,
-        vaultRoot: "/notes",
-        currentPath: "a.md",
-      }),
+      JSON.stringify({ vaultRoot: "/notes", currentPath: "a.md", leftWidth: 250 }),
     );
-    const panes = parsePaneLayout({
-      filesCollapsed: true,
-      leftWidth: 220,
-      rightCollapsed: false,
-      rightWidth: 300,
-      rightSplit: true,
-      rightSlots: [
-        { viewId: "backlinks", pinnedPath: "a.md" },
-        { viewId: "outline", pinnedPath: null },
-      ],
-      backlinksInDocument: true,
-    });
-    expect(panes).not.toBeNull();
-    const next = patchSession(file, panes ?? {});
-    expect(next.vaultRoot).toBe("/notes");
-    expect(next.currentPath).toBe("a.md");
-    expect(next.filesCollapsed).toBe(true);
-    expect(next.rightSplit).toBe(true);
-    expect(next.backlinksInDocument).toBe(true);
+    const migrated = patchSession(file, { appearance: "dark" });
+    expect(loadSession(file)).toEqual(migrated);
+    expect(JSON.parse(serializeSession(migrated))).not.toHaveProperty("vaultRoot");
+    expect(migrated.reader.vaultRoot).toBe("/notes");
+  });
+  it("文件缺失时使用默认会话", () => {
+    expect(loadSession(temporaryFile())).toEqual(emptySession);
   });
 });

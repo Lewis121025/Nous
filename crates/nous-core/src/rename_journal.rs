@@ -1,6 +1,7 @@
 //! 多文件改名的持久化意图。提交标记之前恢复旧内容，之后只清理记录。
 
 use rusqlite::{params, OptionalExtension};
+use std::collections::BTreeSet;
 
 use crate::recovery::RecoveryStore;
 use crate::Error;
@@ -19,6 +20,8 @@ pub(super) struct RenameJournal {
     pub committed: bool,
     pub changes: Vec<FileChange>,
     pub directories: Vec<String>,
+    /// 只有成功创建并记录的目录才允许回滚清理；旧日志缺乏归属证据时保留目录。
+    pub created_directories: BTreeSet<String>,
 }
 
 impl RecoveryStore {
@@ -59,6 +62,7 @@ impl RecoveryStore {
                         committed: row.get(2)?,
                         changes: Vec::new(),
                         directories: Vec::new(),
+                        created_directories: BTreeSet::new(),
                     })
                 },
             )
@@ -91,7 +95,23 @@ impl RecoveryStore {
             .map_err(Error::Recovery)?
             .collect::<Result<_, _>>()
             .map_err(Error::Recovery)?;
+        let mut stmt = conn
+            .prepare("SELECT path FROM rename_created_directories")
+            .map_err(Error::Recovery)?;
+        journal.created_directories = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(Error::Recovery)?
+            .collect::<Result<_, _>>()
+            .map_err(Error::Recovery)?;
         Ok(Some(journal))
+    }
+
+    /// 在独占创建目录成功后记录归属；写入失败时调用方必须清理刚创建的空目录。
+    pub(super) fn record_created_directory(&self, path: &str) -> Result<(), Error> {
+        self.lock()?
+            .execute("INSERT INTO rename_created_directories VALUES (?1)", [path])
+            .map_err(Error::Recovery)?;
+        Ok(())
     }
 
     pub(super) fn start_rename_step(&self, ordinal: usize) -> Result<(), Error> {
@@ -124,7 +144,7 @@ impl RecoveryStore {
     pub(super) fn clear_rename(&self) -> Result<(), Error> {
         let mut conn = self.lock()?;
         let tx = conn.transaction().map_err(Error::Recovery)?;
-        tx.execute_batch("DELETE FROM rename_steps; DELETE FROM rename_directories; DELETE FROM rename_operation;")
+        tx.execute_batch("DELETE FROM rename_steps; DELETE FROM rename_created_directories; DELETE FROM rename_directories; DELETE FROM rename_operation;")
             .map_err(Error::Recovery)?;
         tx.commit().map_err(Error::Recovery)
     }

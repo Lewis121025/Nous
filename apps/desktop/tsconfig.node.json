@@ -22,8 +22,11 @@
     "src/preload/**/*.ts",
     "src/shared/**/*.ts",
     "../../tests/desktop/unit/core-protocol.types.ts",
-    "../../tests/desktop/integration/core-native.test.mts",
-    "../../tests/desktop/e2e/attachments.test.mts",
-    "../../tests/desktop/performance/reading.test.mts"
+    "../../tests/reader/integration/native/core-native.test.mts",
+    "../../tests/reader/e2e/*.test.mts",
+    "../../tests/reader/performance/*.test.mts",
+    "src/features/*/main/**/*.ts",
+    "src/features/*/preload/**/*.ts",
+    "src/features/*/shared/**/*.ts"
   ]
 }

@@ -1,6 +1,10 @@
 import type { CoreClient } from "../../../apps/desktop/src/main/core-client";
 import type { CoreRequest } from "../../../apps/desktop/src/main/core-protocol";
-import type { FileSnapshot, Mentions, WriteResult } from "../../../apps/desktop/src/shared/api";
+import type {
+  FileSnapshot,
+  Mentions,
+  WriteResult,
+} from "../../../apps/desktop/src/features/reader/shared/api";
 
 // 本文件由桌面端类型检查编译，不执行请求；用于锁定协议的编译期约束。
 declare const client: CoreClient;
@@ -30,3 +34,8 @@ const mentions: Promise<Mentions> = client.call("indexMentionsTo", "note.md");
 void mentions;
 // @ts-expect-error 提及查询必须指定库内路径。
 client.call("indexMentionsTo");
+
+// @ts-expect-error 应用会话接口不能写入阅读器状态。
+client.call("sessionPatch", { currentPath: "note.md" });
+// @ts-expect-error 阅读器会话接口不能改写应用外观。
+client.call("readerSessionPatch", { appearance: "dark" });

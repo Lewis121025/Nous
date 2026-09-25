@@ -5,6 +5,7 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use std::path::{Component, Path, PathBuf};
 
 use crate::link::{split_resource, LinkKind};
+use crate::pathutil::path_to_slashes;
 use crate::Error;
 
 const PATH_COMPONENT: &percent_encoding::AsciiSet = &NON_ALPHANUMERIC
@@ -163,8 +164,9 @@ fn resource_suffix(raw: &str) -> &str {
 /// 从 `from_file` 出发指向 `to_file` 的 Markdown 相对 URL。
 ///
 /// 同目录使用 `./文件名`，以便与常见写法一致。
-#[must_use]
-pub fn relative_markdown_url(from_file: &str, to_file: &str) -> String {
+/// # Errors
+/// 生成的系统路径无法无损转换为协议文本时失败，不能改写为另一份文件的链接。
+pub fn relative_markdown_url(from_file: &str, to_file: &str) -> Result<String, Error> {
     let from_dir = Path::new(from_file)
         .parent()
         .unwrap_or_else(|| Path::new(""));
@@ -184,15 +186,15 @@ pub fn relative_markdown_url(from_file: &str, to_file: &str) -> String {
     for part in to_parts.iter().skip(common) {
         url.push(part);
     }
-    let mut rendered = url.to_string_lossy().replace('\\', "/");
+    let mut rendered = path_to_slashes(&url)?;
     if ups == 0 && !rendered.starts_with('.') {
         rendered = format!("./{rendered}");
     }
-    rendered
+    Ok(rendered
         .split('/')
         .map(|part| utf8_percent_encode(part, PATH_COMPONENT).to_string())
         .collect::<Vec<_>>()
-        .join("/")
+        .join("/"))
 }
 
 fn normal_parts(path: &Path) -> Vec<String> {

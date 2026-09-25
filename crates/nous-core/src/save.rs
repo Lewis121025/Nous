@@ -6,8 +6,8 @@ use std::path::Path;
 
 use tempfile::{Builder, NamedTempFile};
 
-use crate::pathutil::resolve_in_root;
-use crate::{Draft, Error, Vault};
+use crate::pathutil::{path_to_slashes, resolve_in_root, validate_relative_path};
+use crate::{Draft, EntryKind, Error, Vault};
 
 /// 文件已提交与版本冲突是不同结果；索引失败不撤销已经提交的内容。
 #[derive(Debug)]
@@ -23,6 +23,8 @@ pub enum WriteOutcome {
 pub struct FileSnapshot {
     /// 当前磁盘字节；删除后的草稿也可以打开。
     pub disk: Option<Vec<u8>>,
+    /// 原路径无法读取时仍返回恢复草稿，并单独携带磁盘错误，不把它误报为删除。
+    pub disk_error: Option<String>,
     /// 上次保存失败或冲突时保留的内容。
     pub draft: Option<Draft>,
 }
@@ -46,12 +48,48 @@ impl Vault {
     /// 越界、读盘或读取恢复记录失败。
     pub fn snapshot(&self, rel: &str) -> Result<FileSnapshot, Error> {
         let _guard = self.lock_writes()?;
-        let disk = read_optional(&resolve_in_root(self.root(), rel)?)?;
-        let draft = self
-            .recovery
-            .get(rel)?
-            .filter(|draft| disk.as_ref() != Some(&draft.bytes));
-        Ok(FileSnapshot { disk, draft })
+        validate_relative_path(rel)?;
+        let draft = self.recovery.get(rel)?;
+        let (disk, disk_error) =
+            match resolve_in_root(self.root(), rel).and_then(|path| read_optional(&path)) {
+                Ok(disk) => (disk, None),
+                Err(error) if draft.is_some() => (None, Some(error.to_string())),
+                Err(error) => return Err(error),
+            };
+        let draft = draft.filter(|draft| !draft.is_committed(disk.as_deref()));
+        Ok(FileSnapshot {
+            disk,
+            disk_error,
+            draft,
+        })
+    }
+
+    /// 仅持久化无法映射为 Markdown 的编辑器快照，不改写笔记或触发索引。
+    ///
+    /// `source` 是会话原始 UTF-8 源码，`expected` 是磁盘基准，`editor` 是编辑器版本化恢复数据。
+    /// 记录可在原文件被删除、父目录不可用或改名恢复尚未完成时保留。
+    ///
+    /// # Errors
+    /// 路径非法、非 Markdown、无效 UTF-8、空恢复数据、草稿路径冲突或恢复数据库不可写。
+    pub fn preserve_editor_draft(
+        &self,
+        rel: &str,
+        source: &[u8],
+        expected: Option<&[u8]>,
+        editor: &str,
+    ) -> Result<(), Error> {
+        let _guard = self.lock_writes()?;
+        validate_relative_path(rel)?;
+        if !rel.to_lowercase().ends_with(".md")
+            || std::str::from_utf8(source).is_err()
+            || editor.is_empty()
+        {
+            return Err(Error::Io(io::Error::other(
+                "编辑器恢复记录需要 Markdown 路径、UTF-8 源码及非空内容",
+            )));
+        }
+        self.recovery
+            .put_editor(rel, source, expected, Some(editor))
     }
 
     /// 基于 `expected` 保存 `bytes`；缺失基准表示仅允许创建新文件。
@@ -61,7 +99,8 @@ impl Vault {
     ///
     /// # Errors
     ///
-    /// 越界、草稿持久化或文件提交前的 IO 失败。提交后的问题随成功结果返回。
+    /// 越界、与其他草稿路径冲突、草稿持久化或提交前的 IO 失败。
+    /// 提交后的问题随成功结果返回。
     pub fn write(
         &self,
         rel: &str,
@@ -69,9 +108,10 @@ impl Vault {
         expected: Option<&[u8]>,
     ) -> Result<WriteOutcome, Error> {
         let _guard = self.lock_writes()?;
-        let path = resolve_in_root(self.root(), rel)?;
+        validate_relative_path(rel)?;
         self.recovery.put(rel, bytes, expected)?;
         crate::rename::recover_pending(self.root(), &self.recovery)?;
+        let path = resolve_in_root(self.root(), rel)?;
         let disk = read_optional(&path)?;
         if disk.as_deref() != expected {
             return Ok(WriteOutcome::Conflict { disk });
@@ -100,10 +140,10 @@ impl Vault {
         })
     }
 
-    /// 将 `bytes` 保存为同目录下的新副本，保留原文件和已有副本。
+    /// 将 `bytes` 保存为新副本，保留原文件和已有副本；原父目录不可用时存入库根。
     ///
     /// `rel` 为原文件路径，`expected` 仅用于记录恢复草稿的基准。
-    /// 返回实际创建的路径；同名候选使用独占创建，避免覆盖并发出现的文件。
+    /// 返回实际创建的路径；跳过被恢复草稿占用的候选名，并使用独占创建保护已有文件。
     ///
     /// # Errors
     ///
@@ -115,15 +155,40 @@ impl Vault {
         expected: Option<&[u8]>,
     ) -> Result<SavedCopy, Error> {
         let _guard = self.lock_writes()?;
-        let path = resolve_in_root(self.root(), rel)?;
+        let relative = validate_relative_path(rel)?;
         self.recovery.put(rel, bytes, expected)?;
         crate::rename::recover_pending(self.root(), &self.recovery)?;
+        let parent = relative.parent().ok_or(Error::PathEscape)?;
+        let original_parent = if parent.as_os_str().is_empty() {
+            Some(self.root().to_path_buf())
+        } else {
+            resolve_in_root(self.root(), &parent.to_string_lossy())
+                .ok()
+                .filter(|path| path.is_dir())
+        };
+        let mut moved_to_root = original_parent.is_none();
+        let mut directory = original_parent.unwrap_or_else(|| self.root().to_path_buf());
+        // 副本是新文件，不继承原文件的权限；只读父目录不能阻断草稿恢复。
+        let mut staged = match stage_bytes(&directory, bytes, None) {
+            Err(Error::Io(error))
+                if directory != self.root()
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+                    ) =>
+            {
+                directory = self.root().to_path_buf();
+                moved_to_root = true;
+                stage_bytes(&directory, bytes, None)?
+            }
+            result => result?,
+        };
+        let path = directory.join(relative.file_name().ok_or(Error::PathEscape)?);
         let stem = path.file_stem().ok_or(Error::PathEscape)?.to_string_lossy();
         let extension = path
             .extension()
             .map(|ext| format!(".{}", ext.to_string_lossy()))
             .unwrap_or_default();
-        let mut staged = stage(&path, bytes)?;
         for number in 1_u64.. {
             let suffix = if number == 1 {
                 "副本".to_string()
@@ -131,14 +196,28 @@ impl Vault {
                 format!("副本 {number}")
             };
             let candidate = path.with_file_name(format!("{stem} ({suffix}){extension}"));
+            let copy_rel = path_to_slashes(
+                candidate
+                    .strip_prefix(self.root())
+                    .map_err(|_| Error::PathEscape)?,
+            )?;
+            if self
+                .recovery
+                .conflicting_path(&copy_rel, EntryKind::File, None)?
+                .is_some()
+            {
+                continue;
+            }
             match staged.persist_noclobber(&candidate) {
                 Ok(_) => {
-                    let copy_rel = candidate
-                        .strip_prefix(self.root())
-                        .map_err(|_| Error::PathEscape)?
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    let warning = self.finish_write(&copy_rel, bytes, rel);
+                    let mut warnings = Vec::new();
+                    if moved_to_root {
+                        warnings.push("原文件夹不可用，副本已保存到笔记库根目录。".to_string());
+                    }
+                    if let Some(warning) = self.finish_write(&copy_rel, bytes, rel) {
+                        warnings.push(warning);
+                    }
+                    let warning = (!warnings.is_empty()).then(|| warnings.join("；"));
                     return Ok(SavedCopy {
                         path: copy_rel,
                         warning,
@@ -180,9 +259,23 @@ pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, Error> {
 pub(super) fn stage(path: &Path, bytes: &[u8]) -> Result<NamedTempFile, Error> {
     let parent = path.parent().ok_or(Error::PathEscape)?;
     fs::create_dir_all(parent)?;
+    stage_bytes(
+        parent,
+        bytes,
+        fs::metadata(path)
+            .ok()
+            .map(|metadata| metadata.permissions()),
+    )
+}
+
+pub(super) fn stage_bytes(
+    parent: &Path,
+    bytes: &[u8],
+    permissions: Option<fs::Permissions>,
+) -> Result<NamedTempFile, Error> {
     let mut file = Builder::new().prefix(".nous-").tempfile_in(parent)?;
-    if let Ok(metadata) = fs::metadata(path) {
-        file.as_file().set_permissions(metadata.permissions())?;
+    if let Some(permissions) = permissions {
+        file.as_file().set_permissions(permissions)?;
     }
     file.write_all(bytes)?;
     file.as_file().sync_all()?;

@@ -1,10 +1,11 @@
 import { defineConfig } from "vitest/config";
 
-// 基准使用实际内核线程；运行前须构建，不将波动的耗时作为单元测试断言。
+// 使用生产前端与实际内核线程，独立执行预算验收，避免多个桌面实例争用渲染资源。
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["../../tests/desktop/performance/*.test.mts"],
+    fileParallelism: false,
+    include: ["../../tests/reader/performance/*.test.mts"],
     testTimeout: 30000,
   },
 });

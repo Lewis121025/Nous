@@ -1,6 +1,7 @@
 import type { Worker } from "node:worker_threads";
 import type { CoreCommand, CoreInput, CoreOutput, CoreRequest } from "./core-protocol";
 import type { CoreService } from "./core-service";
+import type { VaultEvent } from "../features/reader/shared/api";
 
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void };
 
@@ -22,7 +23,7 @@ export class CoreClient {
    */
   constructor(
     private readonly worker: Worker,
-    onChanged: () => void,
+    private readonly onChanged: (event: VaultEvent) => void,
   ) {
     worker.on("message", (message: CoreOutput) => {
       if (message.type === "stopped") {
@@ -30,7 +31,7 @@ export class CoreClient {
         return;
       }
       if (message.type === "changed") {
-        if (this.failure === null && this.stopping === null) onChanged();
+        if (this.failure === null && this.stopping === null) onChanged(message.event);
         return;
       }
       const pending = this.pending.get(message.id);
@@ -100,8 +101,10 @@ export class CoreClient {
   }
 
   private fail(error: Error): void {
+    const first = this.failure === null;
     this.failure ??= error;
     for (const pending of this.pending.values()) pending.reject(this.failure);
     this.pending.clear();
+    if (first) this.onChanged({ status: "worker-error", paths: [], message: this.failure.message });
   }
 }

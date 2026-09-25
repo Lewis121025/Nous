@@ -33,7 +33,8 @@ function start(mode = "normal") {
     { eval: true, workerData: { mode, gate } },
   );
   workers.push(worker);
-  return { client: new CoreClient(worker, vi.fn()), worker, gate };
+  const changed = vi.fn();
+  return { client: new CoreClient(worker, changed), worker, gate, changed };
 }
 
 afterEach(async () => {
@@ -42,7 +43,7 @@ afterEach(async () => {
 
 describe("core client with a real worker thread", () => {
   it("waits for the exit event even when the worker has already reported an error", async () => {
-    const { client, worker } = start("crash");
+    const { client, worker, changed } = start("crash");
     let exited = false;
     worker.once("exit", () => {
       exited = true;
@@ -50,6 +51,7 @@ describe("core client with a real worker thread", () => {
     const failedCall = expect(client.call("vaultList")).rejects.toThrow("测试线程故障");
     await expect(client.shutdown()).rejects.toThrow("测试线程故障");
     expect(exited).toBe(true);
+    expect(changed).toHaveBeenCalledExactlyOnceWith({ status: "worker-error", paths: [], message: "测试线程故障" });
     await failedCall;
   });
 

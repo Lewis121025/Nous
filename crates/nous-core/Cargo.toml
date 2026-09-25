@@ -30,6 +30,10 @@ name = "vault_integration_save_recovery"
 path = "../../tests/vault/integration/save_recovery.rs"
 
 [[test]]
+name = "vault_integration_path_identity"
+path = "../../tests/vault/integration/path_identity.rs"
+
+[[test]]
 name = "links_unit_scan"
 path = "../../tests/links/unit/scan.rs"
 
@@ -47,6 +51,14 @@ path = "../../tests/links/integration/rename_recovery.rs"
 
 [dev-dependencies]
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[[test]]
+name = "vault_unit_entries"
+path = "../../tests/vault/unit/entries.rs"
+
+[[test]]
+name = "vault_unit_attachments"
+path = "../../tests/vault/unit/attachments.rs"
 
 [dependencies]
 markdown = "1.0.0"

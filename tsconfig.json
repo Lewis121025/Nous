@@ -14,8 +14,8 @@
     "noEmit": true,
     "types": ["node"],
     "paths": {
-      "@engine": ["./apps/desktop/src/renderer/src/engine"],
-      "@engine/*": ["./apps/desktop/src/renderer/src/engine/*"]
+      "@reader/*": ["./apps/desktop/src/features/reader/*"],
+      "@app/*": ["./apps/desktop/src/renderer/*"]
     }
   },
   "include": ["tests/**/*.ts", "vitest.config.ts"]

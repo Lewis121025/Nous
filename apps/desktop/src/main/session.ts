@@ -1,16 +1,16 @@
 /**
- * 桌面会话：上次的库、打开的文件、窗口几何、侧栏布局。
+ * 应用会话：窗口、外观及各功能独立的恢复状态。
  *
  * 只在内核工作线程读写；渲染进程不能提交任意库路径。损坏或缺失的文件视为空会话。
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { SIDEBAR_LAYOUT, type PaneLayout, type SidebarSlot as SharedSlot } from "../shared/api";
-
-/** 左侧文件栏默认宽度（像素）。 */
-export const DEFAULT_LEFT_WIDTH = SIDEBAR_LAYOUT.leftWidth;
-/** 右侧栏默认宽度（像素）。 */
-export const DEFAULT_RIGHT_WIDTH = SIDEBAR_LAYOUT.rightWidth;
+import { parseAppearance, type Appearance } from "../shared/api";
+import {
+  emptyReaderSession,
+  parseReaderSession,
+  type ReaderSession,
+} from "../features/reader/shared/session";
 
 /** 窗口位置与最大化；最大化时 x/y/宽高是还原后的 normal bounds。 */
 export type WindowSession = {
@@ -21,44 +21,21 @@ export type WindowSession = {
   maximized: boolean;
 };
 
-/** 右侧栏里的一个视图槽。 */
-export type SidebarSlot = SharedSlot;
-
-/** 启动时要恢复的会话。 */
+/** 启动时恢复的会话；旧的分栏和钉住字段读取时忽略，不影响笔记库与文档。 */
 export type Session = {
-  vaultRoot: string | null;
-  currentPath: string | null;
+  /** 独立于笔记库的应用外观偏好；旧会话默认跟随系统。 */
+  appearance: Appearance;
+  /** 各功能独立持有恢复状态，应用会话只负责组合。 */
+  reader: ReaderSession;
+  /** 上次窗口几何。 */
   window: WindowSession | null;
-  /** 左侧文件栏是否收起。 */
-  filesCollapsed: boolean;
-  /** 左侧栏宽度。 */
-  leftWidth: number;
-  /** 右侧栏是否收起。 */
-  rightCollapsed: boolean;
-  /** 右侧栏宽度。 */
-  rightWidth: number;
-  /** 右侧栏是否上下拆成两个槽。 */
-  rightSplit: boolean;
-  /** 右侧栏视图槽；未拆分时一项，拆分时两项。 */
-  rightSlots: SidebarSlot[];
-  /** 是否在文档底部再显示入链。 */
-  backlinksInDocument: boolean;
 };
 
-const defaultSlots: SidebarSlot[] = [{ viewId: "backlinks", pinnedPath: null }];
-
-/** 没有任何记忆时的空会话。 */
+/** 没有任何记忆时显示文件栏，辅助内容由用户按需展开。 */
 export const emptySession: Session = {
-  vaultRoot: null,
-  currentPath: null,
+  appearance: "system",
+  reader: emptyReaderSession,
   window: null,
-  filesCollapsed: false,
-  leftWidth: DEFAULT_LEFT_WIDTH,
-  rightCollapsed: false,
-  rightWidth: DEFAULT_RIGHT_WIDTH,
-  rightSplit: false,
-  rightSlots: defaultSlots,
-  backlinksInDocument: false,
 };
 
 /**
@@ -99,99 +76,6 @@ function parseWindow(value: unknown): WindowSession | null {
   };
 }
 
-function parseCollapsed(value: unknown): boolean {
-  return value === true;
-}
-
-function parseNullableString(value: unknown): string | null {
-  return typeof value === "string" && value !== "" ? value : null;
-}
-
-function clampWidth(value: unknown, fallback: number): number {
-  if (!isFiniteNumber(value)) {
-    return fallback;
-  }
-  return Math.min(SIDEBAR_LAYOUT.maxWidth, Math.max(SIDEBAR_LAYOUT.minWidth, Math.round(value)));
-}
-
-function parseViewId(value: unknown): SidebarSlot["viewId"] | null {
-  return value === "backlinks" || value === "outline" ? value : null;
-}
-
-function parseSlot(value: unknown): SidebarSlot | null {
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-  const viewId = "viewId" in value ? parseViewId(value.viewId) : null;
-  if (viewId === null) {
-    return null;
-  }
-  const pinnedPath = "pinnedPath" in value ? parseNullableString(value.pinnedPath) : null;
-  return { viewId, pinnedPath };
-}
-
-function parseSlots(value: unknown, split: boolean): SidebarSlot[] {
-  if (!Array.isArray(value)) {
-    return split
-      ? [
-          { viewId: "backlinks", pinnedPath: null },
-          { viewId: "outline", pinnedPath: null },
-        ]
-      : [{ viewId: "backlinks", pinnedPath: null }];
-  }
-  const slots = value
-    .map(parseSlot)
-    .filter((slot): slot is SidebarSlot => slot !== null)
-    .slice(0, 2);
-  if (slots.length === 0) {
-    return parseSlots(undefined, split);
-  }
-  if (split && slots.length === 1) {
-    const second: SidebarSlot =
-      slots[0]?.viewId === "outline"
-        ? { viewId: "backlinks", pinnedPath: null }
-        : { viewId: "outline", pinnedPath: null };
-    return [slots[0] ?? { viewId: "backlinks", pinnedPath: null }, second];
-  }
-  if (!split) {
-    return [slots[0] ?? { viewId: "backlinks", pinnedPath: null }];
-  }
-  return slots;
-}
-
-function parseRightCollapsed(data: Record<string, unknown>): boolean {
-  if ("rightCollapsed" in data) {
-    return parseCollapsed(data.rightCollapsed);
-  }
-  if ("outlineCollapsed" in data) {
-    return parseCollapsed(data.outlineCollapsed);
-  }
-  return false;
-}
-
-/**
- * 只认侧栏布局字段。忽略 `vaultRoot` / `currentPath`，避免渲染进程经 setPanes 改库路径。
- *
- * @param value IPC 传入的未知对象。
- * @returns 合法布局；非对象为 `null`。
- */
-export function parsePaneLayout(value: unknown): PaneLayout | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-  const record = value as Record<string, unknown>;
-  const rightSplit = parseCollapsed(record.rightSplit);
-  return {
-    filesCollapsed: parseCollapsed(record.filesCollapsed),
-    leftWidth: clampWidth(record.leftWidth, DEFAULT_LEFT_WIDTH),
-    rightCollapsed: parseCollapsed(record.rightCollapsed),
-    rightWidth: clampWidth(record.rightWidth, DEFAULT_RIGHT_WIDTH),
-    rightSplit,
-    rightSlots: parseSlots(record.rightSlots, rightSplit),
-    backlinksInDocument: parseCollapsed(record.backlinksInDocument),
-  };
-}
-
 /**
  * 把 JSON 文本解析为会话；无法识别则返回 `null`。
  *
@@ -209,16 +93,11 @@ export function parseSession(raw: string): Session | null {
     return null;
   }
   const record = data as Record<string, unknown>;
-  const panes = parsePaneLayout(record);
-  if (panes === null) {
-    return null;
-  }
   return {
-    vaultRoot: "vaultRoot" in record ? parseNullableString(record.vaultRoot) : null,
-    currentPath: "currentPath" in record ? parseNullableString(record.currentPath) : null,
+    // 兼容旧版平铺状态；新写入只保留 reader 命名空间。
+    reader: parseReaderSession("reader" in record ? record.reader : record),
+    appearance: parseAppearance(record.appearance) ?? "system",
     window: "window" in record ? parseWindow(record.window) : null,
-    ...panes,
-    rightCollapsed: parseRightCollapsed(record),
   };
 }
 

@@ -14,5 +14,12 @@
     "types": ["svelte"],
     "noEmit": true
   },
-  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.svelte", "src/shared/**/*.ts"]
+  "include": [
+    "src/renderer/**/*.ts",
+    "src/renderer/**/*.svelte",
+    "src/features/*/renderer/**/*.ts",
+    "src/features/*/renderer/**/*.svelte",
+    "src/features/*/shared/**/*.ts",
+    "src/shared/**/*.ts"
+  ]
 }

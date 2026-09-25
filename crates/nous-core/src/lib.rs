@@ -3,6 +3,8 @@
 //! 负责打开笔记库、按相对路径读写原始字节，以及链接索引与改名事务。
 //! 本 crate 不依赖 Node-API，测试直接调用此处 API。
 
+mod attachments;
+mod entries;
 mod error;
 mod index;
 mod link;
@@ -18,9 +20,12 @@ mod vault;
 mod watch;
 mod wiki;
 
+pub use attachments::{ImportedAttachment, MAX_ATTACHMENT_BYTES};
+pub use entries::{EntryKind, VaultEntry};
 pub use error::Error;
 pub use link::{LinkKind, LinkRecord};
 pub use mention::{MentionKind, MentionRecord, Mentions};
+pub use pathutil::path_to_slashes;
 pub use recovery::Draft;
 pub use rename::RenameOutcome;
 pub use save::{FileSnapshot, SavedCopy, WriteOutcome};

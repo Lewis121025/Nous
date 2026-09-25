@@ -9,7 +9,7 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   ...eslintPluginSvelte.configs["flat/recommended"],
   {
-    files: ["src/**/*.svelte"],
+    files: ["src/**/*.svelte", "src/**/*.svelte.ts"],
     languageOptions: {
       parser: svelteParser,
       parserOptions: {
