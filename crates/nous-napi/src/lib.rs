@@ -165,16 +165,25 @@ pub fn vault_entries() -> Result<Vec<JsVaultEntry>> {
         .collect())
 }
 
-/// 创建空笔记或文件夹；非法类型、同名目标或磁盘失败时拒绝。
+/// 创建笔记或文件夹；`content` 是文件初始字节（缺省为空），创建与写入
+/// 是同一次独占提交。非法类型、同名目标、目录携带内容或磁盘失败时拒绝。
 #[napi]
-pub fn entry_create(path: String, kind: String) -> Result<JsRenameOutcome> {
+pub fn entry_create(
+    path: String,
+    kind: String,
+    content: Option<Buffer>,
+) -> Result<JsRenameOutcome> {
     let kind = match kind.as_str() {
         "file" => nous_core::EntryKind::File,
         "directory" => nous_core::EntryKind::Directory,
         _ => return Err(Error::from_reason("未知条目类型")),
     };
+    let content = content.map(|buffer| buffer.to_vec());
     Ok(JsRenameOutcome {
-        warning: with_vault(|vault| vault.create_entry(&path, kind))?.warning,
+        warning: with_vault(|vault| {
+            vault.create_entry(&path, kind, content.as_deref().unwrap_or(&[]))
+        })?
+        .warning,
     })
 }
 
@@ -516,6 +525,27 @@ pub fn index_mentions_to(path: String) -> Result<JsMentions> {
     })
 }
 
+/// 把 `from` 文件里 `[start_byte, end_byte)` 的未链接提及就地转为指向
+/// `target` 的 wiki 链接；`expected` 是查询时的提及文本，文件已变化时拒绝。
+///
+/// # Errors
+///
+/// 未打开库、目标不在库内、区间过期或写盘失败。
+#[napi]
+pub fn mentions_linkify(
+    from: String,
+    start_byte: i64,
+    end_byte: i64,
+    expected: String,
+    target: String,
+) -> Result<JsRenameOutcome> {
+    let result =
+        with_vault(|vault| vault.linkify_mention(&from, start_byte, end_byte, &expected, &target))?;
+    Ok(JsRenameOutcome {
+        warning: result.warning,
+    })
+}
+
 /// 属性谓词：frontmatter 键值对，键值均大小写不敏感精确匹配。
 #[napi(object)]
 pub struct JsSearchAttribute {
@@ -593,6 +623,32 @@ pub struct JsHeadingRecord {
     pub start_byte: i64,
     /// 字节区间终点（不含）。
     pub end_byte: i64,
+}
+
+/// 全库标签计数的一行。
+#[napi(object)]
+pub struct JsTagCount {
+    /// 规范化标签（小写、无 `#`）。
+    pub tag: String,
+    /// 携带该标签的文件数。
+    pub count: i64,
+}
+
+/// 全库标签及计数，标签升序；供标签浏览面板。
+///
+/// # Errors
+///
+/// 未打开库。
+#[napi]
+pub fn index_tags() -> Result<Vec<JsTagCount>> {
+    let counts = with_vault(Vault::tag_counts)?;
+    Ok(counts
+        .into_iter()
+        .map(|count| JsTagCount {
+            tag: count.tag,
+            count: count.count,
+        })
+        .collect())
 }
 
 /// `path` 的全部标题，按文档顺序；供锚点解析与标题补全。

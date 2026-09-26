@@ -51,16 +51,18 @@ test("源码视图：排版表达不了的语法逐字节保真，[[ 补全与�
   for (const [name, value] of Object.entries(process.env)) {
     if (value !== undefined && name !== "ELECTRON_RENDERER_URL") environment[name] = value;
   }
-  const app = await electron.launch({
-    executablePath: executable,
-    colorScheme: null,
-    args: [
-      fileURLToPath(new URL("out/main/index.js", desktop)),
-      `--user-data-dir=${userData}`,
-      "--no-sandbox",
-    ],
-    env: environment,
-  });
+  const launch = () =>
+    electron.launch({
+      executablePath: executable,
+      colorScheme: null,
+      args: [
+        fileURLToPath(new URL("out/main/index.js", desktop)),
+        `--user-data-dir=${userData}`,
+        "--no-sandbox",
+      ],
+      env: environment,
+    });
+  let app = await launch();
   try {
     const page = await app.firstWindow();
     const errors: string[] = [];
@@ -89,11 +91,20 @@ test("源码视图：排版表达不了的语法逐字节保真，[[ 补全与�
     await page.keyboard.press("Enter");
     await expect.poll(() => code.textContent()).toContain("[[目标笔记]]");
 
+    // 标题锚点补全：# 之后经跨进程解析列出目标标题（detail 为「标题」），
+    // 与文件候选可区分；回车补出完整锚点链接。
+    await page.keyboard.type("[[目标笔记#");
+    const headingOption = page.locator(".cm-tooltip-autocomplete li").first();
+    await expect.poll(() => headingOption.textContent()).toContain("标题");
+    expect(await headingOption.textContent()).toContain("目标");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => code.textContent()).toContain("[[目标笔记#目标]]");
+
     // 保存：除补全插入外，磁盘字节与原文完全一致——特殊语法零重写。
     await page.keyboard.press("ControlOrMeta+s");
     await expect
       .poll(() => readFile(join(vault, "笔记.md"), "utf8"))
-      .toBe(original + "[[目标笔记]]");
+      .toBe(original + "[[目标笔记]][[目标笔记#目标]]");
     const saved = await readFile(join(vault, "笔记.md"), "utf8");
     expect(saved).toContain("__强调__");
     expect(saved).toContain("~~~text");
@@ -105,7 +116,8 @@ test("源码视图：排版表达不了的语法逐字节保真，[[ 补全与�
     const editor = page.locator(".ProseMirror");
     await editor.waitFor();
     await expect.poll(() => editor.locator("strong").textContent()).toBe("强调");
-    expect(await editor.locator(".wiki-link").count()).toBe(1);
+    // 文件补全与锚点补全各留下一条 wiki 链接。
+    expect(await editor.locator(".wiki-link").count()).toBe(2);
 
     // Cmd/Ctrl+E 快捷键往返切换，未保存编辑不丢失。
     await page.keyboard.press("ControlOrMeta+e");
@@ -114,7 +126,25 @@ test("源码视图：排版表达不了的语法逐字节保真，[[ 补全与�
     await page.locator(".ProseMirror").waitFor();
     await expect.poll(() => page.locator(".ProseMirror").textContent()).toContain("结尾段落。");
 
+    // 视图记忆随会话持久化：切到源码视图，等待写入会话后重启。
+    await page.keyboard.press("ControlOrMeta+e");
+    await page.locator(".cm-content").waitFor();
+    await expect
+      .poll(async () => {
+        const session = JSON.parse(await readFile(join(userData, "session.json"), "utf8"));
+        return (session.reader?.sourceViews ?? []) as string[];
+      })
+      .toContain("笔记.md");
     expect(errors).toEqual([]);
+
+    await app.close();
+    app = await launch();
+    const reopened = await app.firstWindow();
+    // 重启后同一文件直接以源码视图打开，不再经过排版表面。
+    await reopened.locator(".cm-content").waitFor();
+    await expect.poll(() => reopened.locator(".document-name").textContent()).toBe("笔记.md");
+    expect(await reopened.locator(".ProseMirror").count()).toBe(0);
+    await expect.poll(() => reopened.locator(".cm-content").textContent()).toContain("__强调__");
   } finally {
     await app.close();
   }

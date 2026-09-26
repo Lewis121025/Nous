@@ -14,6 +14,7 @@ import type {
   SavedCopy,
   SearchHit,
   SearchQuery,
+  TagCount,
   VaultRestore,
   WriteResult,
   VaultEntry,
@@ -26,9 +27,12 @@ import type {
   HistoryEntry,
   ReaderSession,
   ReaderSessionStore,
+  SessionDocuments,
   SessionHistory,
 } from "../shared/session";
+import { emptySessionDocuments } from "../shared/session";
 import {
+  parseEntryOutcome,
   parseFileBytes,
   parseHeadingRecords,
   parseLinkRecords,
@@ -36,6 +40,7 @@ import {
   parseMentions,
   parseSearchHits,
   parseSearchQueryArgument,
+  parseTagCounts,
   parseWriteResult,
   parseSavedCopy,
 } from "../shared/reader-protocol";
@@ -109,6 +114,46 @@ function mapSessionHistory(
   return changed ? { back, forward } : null;
 }
 
+/** 全部分栏的文档会话迁移；没有任何变化时返回 null，避免无谓的会话重写。 */
+function mapSessionDocuments(
+  documents: SessionDocuments,
+  mapPath: (path: string) => string | null,
+): SessionDocuments | null {
+  let changed = false;
+  const panes = documents.panes.map((pane) => {
+    let currentPath = pane.currentPath;
+    if (currentPath !== null) {
+      const mapped = mapPath(currentPath);
+      if (mapped !== currentPath) {
+        currentPath = mapped;
+        changed = true;
+      }
+    }
+    const history = mapSessionHistory(pane.history, mapPath);
+    if (history !== null) changed = true;
+    return { currentPath, history: history ?? pane.history };
+  });
+  return changed ? { ...documents, panes } : null;
+}
+
+/** 源码视图记忆的路径迁移；没有任何变化时返回 null，避免无谓的会话重写。 */
+function mapSourceViews(
+  sourceViews: string[],
+  mapPath: (path: string) => string | null,
+): string[] | null {
+  let changed = false;
+  const out = sourceViews.flatMap((entry) => {
+    const path = mapPath(entry);
+    if (path === null) {
+      changed = true;
+      return [];
+    }
+    if (path !== entry) changed = true;
+    return [path];
+  });
+  return changed ? out : null;
+}
+
 /**
  * 创建仅由工作线程使用的同步内核服务，所有命令共用同一库与会话。
  *
@@ -149,19 +194,15 @@ export function createReaderService(
   ): RenameOutcome {
     try {
       const session = sessions.load();
-      let currentPath = session.currentPath;
-      let changed = false;
-      if (currentPath !== null) {
-        const mapped = mapPath(currentPath);
-        if (mapped !== currentPath) {
-          currentPath = mapped;
-          changed = true;
-        }
-      }
-      // 阅读栈条目与当前文档同一口径跟随改名/删除。
-      const history = mapSessionHistory(session.history, mapPath);
-      if (history !== null) changed = true;
-      if (changed) sessions.save({ ...session, currentPath, history: history ?? session.history });
+      // 各分栏的当前文档、阅读栈与源码视图记忆同一口径跟随改名/删除。
+      const documents = mapSessionDocuments(session.documents, mapPath);
+      const sourceViews = mapSourceViews(session.sourceViews, mapPath);
+      if (documents !== null || sourceViews !== null)
+        sessions.save({
+          ...session,
+          documents: documents ?? session.documents,
+          sourceViews: sourceViews ?? session.sourceViews,
+        });
     } catch (error) {
       warning = [warning, `文件操作已完成，会话更新失败：${String(error)}`]
         .filter(Boolean)
@@ -179,8 +220,8 @@ export function createReaderService(
       sessions.save({
         ...previous,
         vaultRoot: root,
-        currentPath: null,
-        history: { back: [], forward: [] },
+        documents: emptySessionDocuments(),
+        sourceViews: [],
       });
       try {
         openVault(root);
@@ -199,7 +240,11 @@ export function createReaderService(
       const root = stored.vaultRoot;
       if (root === null || !isDirectory(root)) return null;
       openVault(root);
-      return { root, currentPath: stored.currentPath, history: stored.history };
+      return {
+        root,
+        documents: stored.documents,
+        sourceViews: stored.sourceViews,
+      };
     },
     vaultClose(): void {
       native.vaultClose();
@@ -218,9 +263,10 @@ export function createReaderService(
         };
       });
     },
-    entryCreate(path: string, kind: VaultEntry["kind"]): RenameOutcome {
+    entryCreate(path: string, kind: VaultEntry["kind"], content?: Uint8Array): RenameOutcome {
       return rememberEntryChange(
-        native.entryCreate(path, kind).warning ?? null,
+        native.entryCreate(path, kind, content === undefined ? null : Buffer.from(content))
+          .warning ?? null,
         (current) => current,
       );
     },
@@ -329,6 +375,17 @@ export function createReaderService(
     indexMentionsTo(path: string): Mentions {
       return mapMentions(native.indexMentionsTo(path));
     },
+    mentionsLinkify(
+      from: string,
+      startByte: number,
+      endByte: number,
+      expected: string,
+      target: string,
+    ): RenameOutcome {
+      return parseEntryOutcome({
+        warning: native.mentionsLinkify(from, startByte, endByte, expected, target).warning ?? null,
+      });
+    },
     searchQuery(query: SearchQuery): SearchHit[] {
       const request = parseSearchQueryArgument(query);
       return parseSearchHits(
@@ -344,6 +401,9 @@ export function createReaderService(
     },
     indexHeadings(path: string): HeadingRecord[] {
       return parseHeadingRecords(native.indexHeadings(path));
+    },
+    indexTags(): TagCount[] {
+      return parseTagCounts(native.indexTags());
     },
     entryRename(from: string, to: string): RenameOutcome {
       const result = native.entryRename(from, to);

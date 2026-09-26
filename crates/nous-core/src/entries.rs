@@ -65,10 +65,19 @@ impl Vault {
         Ok(entries)
     }
 
-    /// 独占创建空笔记或单个文件夹，父目录必须已存在，不覆盖任何条目。
+    /// 独占创建笔记或单个文件夹，父目录必须已存在，不覆盖任何条目。
+    ///
+    /// `content` 是文件的初始字节（空切片即空文件）；创建与写入是同一次
+    /// 独占提交，磁盘上不存在「先空文件、后补内容」的中间窗口。
     /// # Errors
-    /// 名称非法、父目录不存在、目标已存在、草稿路径冲突或恢复事务受阻时失败。
-    pub fn create_entry(&self, rel: &str, kind: EntryKind) -> Result<RenameOutcome, Error> {
+    /// 名称非法、父目录不存在、目标已存在、草稿路径冲突、目录携带内容
+    /// 或恢复事务受阻时失败。
+    pub fn create_entry(
+        &self,
+        rel: &str,
+        kind: EntryKind,
+        content: &[u8],
+    ) -> Result<RenameOutcome, Error> {
         let _guard = self.lock_writes()?;
         crate::rename::recover_pending(self.root(), &self.recovery)?;
         validate_entry_path(rel)?;
@@ -86,11 +95,16 @@ impl Vault {
         }
         match kind {
             EntryKind::File => {
-                stage(&path, b"")?
+                stage(&path, content)?
                     .persist_noclobber(&path)
                     .map_err(|error| error.error)?;
             }
-            EntryKind::Directory => fs::create_dir(&path)?,
+            EntryKind::Directory => {
+                if !content.is_empty() {
+                    return Err(Error::Io(io::Error::other("文件夹不能携带初始内容")));
+                }
+                fs::create_dir(&path)?;
+            }
         }
         Ok(self.finish_entry(&path))
     }

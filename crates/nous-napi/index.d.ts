@@ -53,8 +53,11 @@ export interface JsVaultEntry {
 }
 /** 列出完整目录；未打开库或目录读取失败时返回错误。 */
 export declare function vaultEntries(): Array<JsVaultEntry>
-/** 创建空笔记或文件夹；非法类型、同名目标或磁盘失败时拒绝。 */
-export declare function entryCreate(path: string, kind: string): JsRenameOutcome
+/**
+ * 创建笔记或文件夹；`content` 是文件初始字节（缺省为空），创建与写入
+ * 是同一次独占提交。非法类型、同名目标、目录携带内容或磁盘失败时拒绝。
+ */
+export declare function entryCreate(path: string, kind: string, content?: Buffer | undefined | null): JsRenameOutcome
 /** 独占导入的附件位置和提交后警告。 */
 export interface JsImportedAttachment {
   /** 实际库内路径，同名避让后可能与原文件名不同。 */
@@ -231,6 +234,15 @@ export declare function indexLinksFrom(path: string): Array<JsLinkRecord>
  * 未打开库。
  */
 export declare function indexMentionsTo(path: string): JsMentions
+/**
+ * 把 `from` 文件里 `[start_byte, end_byte)` 的未链接提及就地转为指向
+ * `target` 的 wiki 链接；`expected` 是查询时的提及文本，文件已变化时拒绝。
+ *
+ * # Errors
+ *
+ * 未打开库、目标不在库内、区间过期或写盘失败。
+ */
+export declare function mentionsLinkify(from: string, startByte: number, endByte: number, expected: string, target: string): JsRenameOutcome
 /** 属性谓词：frontmatter 键值对，键值均大小写不敏感精确匹配。 */
 export interface JsSearchAttribute {
   /** 属性名，保留原文大小写。 */
@@ -281,6 +293,21 @@ export interface JsHeadingRecord {
   /** 字节区间终点（不含）。 */
   endByte: number
 }
+/** 全库标签计数的一行。 */
+export interface JsTagCount {
+  /** 规范化标签（小写、无 `#`）。 */
+  tag: string
+  /** 携带该标签的文件数。 */
+  count: number
+}
+/**
+ * 全库标签及计数，标签升序；供标签浏览面板。
+ *
+ * # Errors
+ *
+ * 未打开库。
+ */
+export declare function indexTags(): Array<JsTagCount>
 /**
  * `path` 的全部标题，按文档顺序；供锚点解析与标题补全。
  *

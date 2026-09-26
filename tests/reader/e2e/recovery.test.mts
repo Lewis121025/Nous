@@ -35,7 +35,10 @@ test("目录被外部替换后，恢复草稿仍可打开、继续编辑并安�
         new TextEncoder().encode("# 恢复的想法\n\n这些编辑需要保留。\n"),
         new TextEncoder().encode("原始版本"),
       );
-    await core.call("readerSessionPatch", { currentPath: "欢迎.md" });
+    await core.call(
+      "readerSessionPatch",
+      { documents: { panes: [{ currentPath: "欢迎.md", history: { back: [], forward: [] } }], active: 0, split: false } },
+    );
   } finally {
     await core.shutdown();
   }

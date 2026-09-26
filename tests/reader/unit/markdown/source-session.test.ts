@@ -3,6 +3,7 @@ import { EditorState } from "prosemirror-state";
 import { closeHistory, history, undo, redo } from "prosemirror-history";
 import { createMarkdownSession } from "@reader/renderer/engine/markdown/source-session";
 import { parseMarkdown } from "@reader/renderer/engine/markdown/parse";
+import { documentSchema } from "@reader/renderer/engine/markdown/schema";
 
 function edit(source: string, needle: string, replacement: string): string {
   const session = createMarkdownSession(source);
@@ -35,6 +36,27 @@ describe("局部编辑的源码契约", () => {
       expect(saved).toBe("\uFEFF" + replacement.replace(/\n/g, "\r\n") + "\r\n\r\n尾文 _保留_");
     },
   );
+  it("CRLF 文件的 frontmatter 外科编辑不产生双重 \\r，字节保真", () => {
+    const source =
+      "---\r\nstatus: draft # 进行中\r\nauthor:\r\n  name: 张三\r\n---\r\n\r\n# 标题\r\n\r\n正文。\r\n";
+    const session = createMarkdownSession(source);
+    const state = EditorState.create({ doc: session.doc });
+    // 模拟属性面板：整块替换 frontmatter 源码保留块（混合形态：围栏联接 \n、内部行 \r\n、末内容行不带 \r）。
+    const edited = "---\nstatus: done # 进行中\r\nauthor:\r\n  name: 张三\r\ndue: 明天\n---";
+    const transaction = state.tr.replaceWith(
+      0,
+      state.doc.child(0).nodeSize,
+      documentSchema.node("markdown_block", null, documentSchema.text(edited)),
+    );
+    session.track(transaction);
+    const saved = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+      session.snapshot(transaction.doc).bytes,
+    );
+    expect(saved).toBe(
+      "---\r\nstatus: done # 进行中\r\nauthor:\r\n  name: 张三\r\ndue: 明天\r\n---\r\n\r\n# 标题\r\n\r\n正文。\r\n",
+    );
+  });
+
   it("事务映射跟随输入、快照重定位并拒绝旧版本位置", () => {
     const source = "中文 👩‍💻 定位\n\n另一段\n";
     const session = createMarkdownSession(source);

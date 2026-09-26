@@ -57,12 +57,8 @@ describe("功能模块依赖边界", () => {
       "navigation.svelte": ["document.svelte"],
       "search.svelte": [],
       "history.svelte": [],
-      "workspace.svelte": [
-        "document.svelte",
-        "navigation.svelte",
-        "search.svelte",
-        "history.svelte",
-      ],
+      "pane.svelte": ["document.svelte", "navigation.svelte", "history.svelte"],
+      "workspace.svelte": ["pane.svelte", "search.svelte", "history.svelte"],
     };
     const violations: string[] = [];
     for (const [module, allowed] of Object.entries(allowedStates)) {

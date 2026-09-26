@@ -147,7 +147,7 @@ fn ensure_link_resolution(conn: &Connection) -> Result<(), Error> {
 }
 
 /// 扫描器/解析输出格式。区间或目标解析变了必须加一，已打开的库才会重扫而不是复用旧行。
-pub(crate) const SCAN_VERSION: i32 = 8;
+pub(crate) const SCAN_VERSION: i32 = 9;
 
 /// 当前索引里记录的扫描器版本；从未写过则为 0。
 pub(crate) fn scan_version(conn: &Connection) -> Result<i32, Error> {
@@ -315,6 +315,35 @@ fn delete_derived(conn: &Connection, path: &str) -> Result<(), Error> {
     conn.execute("DELETE FROM attributes WHERE path = ?1", params![path])?;
     conn.execute("DELETE FROM search_index WHERE path = ?1", params![path])?;
     Ok(())
+}
+
+/// 全库标签计数的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagCount {
+    /// 规范化标签（小写、无 `#`）。
+    pub tag: String,
+    /// 携带该标签的文件数。
+    pub count: i64,
+}
+
+/// 按标签聚合计数，标签升序；供标签浏览面板组树。
+///
+/// # Errors
+///
+/// `SQLite` 失败时返回错误。
+pub(crate) fn load_tag_counts(conn: &Connection) -> Result<Vec<TagCount>, Error> {
+    let mut stmt = conn.prepare("SELECT tag, count(*) FROM tags GROUP BY tag ORDER BY tag")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(TagCount {
+            tag: row.get(0)?,
+            count: row.get(1)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 /// 读取一篇文件的全部标题，按文档顺序。

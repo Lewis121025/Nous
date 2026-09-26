@@ -46,6 +46,10 @@ name = "links_unit_mentions"
 path = "../../tests/links/unit/mentions.rs"
 
 [[test]]
+name = "links_unit_linkify"
+path = "../../tests/links/unit/linkify.rs"
+
+[[test]]
 name = "links_integration_rename"
 path = "../../tests/links/integration/rename.rs"
 

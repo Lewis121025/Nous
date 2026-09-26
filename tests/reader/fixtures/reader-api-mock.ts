@@ -16,8 +16,12 @@ export function createReaderApiMock(overrides: Partial<ReaderApi> = {}): ReaderA
   const api: ReaderApi = {
     vaultRestore: vi.fn(async () => ({
       root: "/notes",
-      currentPath: null,
-      history: { back: [], forward: [] },
+      documents: {
+        panes: [{ currentPath: null, history: { back: [], forward: [] } }],
+        active: 0,
+        split: false,
+      },
+      sourceViews: [],
     })),
     vaultOpen: vi.fn(async () => null),
     vaultClose: vi.fn(async () => {}),
@@ -32,8 +36,8 @@ export function createReaderApiMock(overrides: Partial<ReaderApi> = {}): ReaderA
     filePreserveDraft: vi.fn(async () => {}),
     fileWrite: vi.fn(async () => ({ status: "saved" as const, warning: null })),
     fileWriteCopy: vi.fn(async () => ({ path: "副本.md", warning: null })),
-    sessionSetCurrent: vi.fn(async () => {}),
-    sessionSetHistory: vi.fn(async () => {}),
+    sessionSetDocuments: vi.fn(async () => {}),
+    sessionSetSourceViews: vi.fn(async () => {}),
     sessionGetPanes: vi.fn(async () => ({ filesCollapsed: false, leftWidth: 232 })),
     sessionSetPanes: vi.fn(async () => {}),
     linksResolve: vi.fn(async (): Promise<LinkTarget> => ({ status: "dead" })),
@@ -41,8 +45,10 @@ export function createReaderApiMock(overrides: Partial<ReaderApi> = {}): ReaderA
     indexLinksTo: vi.fn(async () => []),
     indexLinksFrom: vi.fn(async () => []),
     indexMentionsTo: vi.fn(async () => ({ linked: [], unlinked: [] })),
+    mentionsLinkify: vi.fn(async () => ({ warning: null })),
     searchQuery: vi.fn(async (): Promise<SearchHit[]> => []),
     indexHeadings: vi.fn(async () => []),
+    indexTags: vi.fn(async () => []),
     entryRename: vi.fn(async () => ({ warning: null })),
     subscribeVaultChanged: () => () => {},
   };

@@ -75,7 +75,7 @@ fn inline_tag_rules_match_fixture_expectations() {
 }
 
 #[test]
-fn frontmatter_attributes_only_model_flat_scalars() {
+fn frontmatter_attributes_flatten_nested_maps_with_dot_keys() {
     let (_root, index, _vault) = fixture_vault();
     let mut attributes = indexed_attributes(&index, "inline-tags.md");
     attributes.sort();
@@ -83,12 +83,80 @@ fn frontmatter_attributes_only_model_flat_scalars() {
         attributes,
         [
             ("draft".to_string(), "false".to_string()),
-            ("list".to_string(), "one".to_string()),
-            ("list".to_string(), "two".to_string()),
+            // 夹具的 list 含嵌套数组元素 → 含复合元素的序列按下标展平；
+            // 下标 2 的扁平数组每元素一行。
+            ("list.0".to_string(), "one".to_string()),
+            ("list.1".to_string(), "two".to_string()),
+            ("list.2".to_string(), "me".to_string()),
+            ("list.2".to_string(), "skip".to_string()),
+            ("nestedmap.key".to_string(), "value".to_string()),
             ("priority".to_string(), "2".to_string()),
             ("status".to_string(), "active".to_string()),
         ]
     );
+}
+
+#[test]
+fn nested_structures_flatten_by_dot_and_index_with_depth_limit() {
+    let root = TempDir::new().expect("库");
+    let index = TempDir::new().expect("索引");
+    fs::write(
+        root.path().join("deep.md"),
+        [
+            "---",
+            "author:",
+            "  name: 张三",
+            "  contact:",
+            "    email: a@b.c",
+            "    deep:",
+            "      x: 1",
+            "      y:",
+            "        z: dropped",
+            "mixed:",
+            "  - name: 项一",
+            "  - 3",
+            "---",
+            "",
+            "正文",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("写夹具");
+    let _vault = Vault::open(root.path(), index.path()).expect("打开");
+    let mut attributes = indexed_attributes(&index, "deep.md");
+    attributes.sort();
+    assert_eq!(
+        attributes,
+        [
+            // 4 段键是上限：author.contact.deep.x 保留，y.z（5 段）丢弃。
+            ("author.contact.deep.x".to_string(), "1".to_string()),
+            ("author.contact.email".to_string(), "a@b.c".to_string()),
+            ("author.name".to_string(), "张三".to_string()),
+            ("mixed.0.name".to_string(), "项一".to_string()),
+            ("mixed.1".to_string(), "3".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn dotted_attribute_keys_are_searchable() {
+    let root = TempDir::new().expect("库");
+    let index = TempDir::new().expect("索引");
+    fs::write(
+        root.path().join("a.md"),
+        "---\nauthor:\n  name: 张三\n---\n\n正文\n",
+    )
+    .expect("写夹具");
+    let vault = Vault::open(root.path(), index.path()).expect("打开");
+    let hits = vault
+        .search(&SearchQuery {
+            attributes: vec![("author.name".to_string(), "张三".to_string())],
+            ..SearchQuery::default()
+        })
+        .expect("检索");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, "a.md");
 }
 
 #[test]

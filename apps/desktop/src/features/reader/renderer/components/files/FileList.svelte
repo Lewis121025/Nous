@@ -3,6 +3,7 @@
   import Sidebar from "./Sidebar.svelte";
   import FileTreeViewport from "./FileTreeViewport.svelte";
   import SearchResults from "./SearchResults.svelte";
+  import TagBrowser from "./TagBrowser.svelte";
   import type { EntryDialogAction } from "./FileEntryDialog.svelte";
   import FileMenu from "./FileMenu.svelte";
   import type { SearchHit, VaultEntry } from "../../../shared/api";
@@ -46,6 +47,8 @@
   let searchInput: HTMLInputElement;
   let menu: FileMenu;
   const search = $derived(workspace.search);
+  /** 侧栏主体：文件树或标签浏览；检索结果优先于两者。 */
+  let paneMode = $state<"files" | "tags">("files");
   let dragging = $state<VaultEntry | null>(null);
   let dropTarget = $state<string | null>(null);
   let previousRoot: string | null | undefined;
@@ -81,6 +84,7 @@
         expanded = new Set();
         query = "";
         selected = null;
+        paneMode = "files";
         previousRoot = root;
       }
       expanded = new Set([...expanded, ...ancestorDirectories(path)]);
@@ -215,15 +219,27 @@
     }
     clearSearch();
   }
-  /** 回车提交全文检索；检索完成后键盘进入结果列表。 */
+  /**
+   * 回车提交全文检索；检索完成后键盘进入结果列表。
+   *
+   * 活动栏正在切换时不提交：文件栏的检索和打开要等这栏的门禁结束。
+   * 另一栏的编辑不走这条锁。
+   */
   async function submitSearch(): Promise<void> {
+    if (busy) return;
     await search.run(query);
     if (!search.active) return;
     await tick();
     searchResults?.focusFirst();
   }
+  /** 选中标签：转成 `tag:` 谓词检索，主体让位给结果列表。 */
+  function pickTag(tag: string): void {
+    paneMode = "files";
+    query = `tag:${tag}`;
+    void submitSearch();
+  }
   function searchKeydown(event: KeyboardEvent): void {
-    if (isCompositionKey(event) || workspace.isComposing) return;
+    if (busy || isCompositionKey(event) || workspace.isComposing) return;
     if (event.key === "Escape" && (search.active || query !== "")) {
       event.preventDefault();
       event.stopPropagation();
@@ -331,6 +347,20 @@
       <div class="tools">
         <button
           type="button"
+          aria-label="浏览标签"
+          aria-pressed={paneMode === "tags"}
+          title="浏览标签"
+          disabled={busy || workspace.vaultRoot === null}
+          onclick={() => {
+            paneMode = paneMode === "tags" ? "files" : "tags";
+            treeViewport?.resetScroll();
+          }}
+          ><svg viewBox="0 0 20 20" aria-hidden="true"
+            ><path d="M8 3 6.5 17M14 3l-1.5 14M4 7.5h12M3.5 12.5h12" /></svg
+          ></button
+        >
+        <button
+          type="button"
           aria-label="新建笔记"
           aria-keyshortcuts="Meta+N Control+N"
           title="新建笔记（⌘N / Ctrl+N）"
@@ -367,6 +397,7 @@
         aria-keyshortcuts="Meta+Shift+F Control+Shift+F"
         placeholder="搜索文件，回车搜全文"
         title="输入即过滤文件；回车全文搜索，支持 tag:标签、path:路径、属性名:值"
+        disabled={busy}
         bind:this={searchInput}
         bind:value={query}
         oninput={() => treeViewport?.resetScroll()}
@@ -378,6 +409,7 @@
           class="clear-search"
           aria-label="清除搜索"
           title="清除搜索（Esc）"
+          disabled={busy}
           onclick={clearSearch}
           ><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 6 8 8m0-8-8 8" /></svg></button
         >
@@ -391,6 +423,8 @@
         onActivate={(hit) => void openHit(hit)}
         onExit={escapeSearch}
       />
+    {:else if paneMode === "tags"}
+      <TagBrowser {workspace} onPick={pickTag} />
     {:else}
       {#if recoveries.length > 0}
         <section class="recovery" aria-label="待恢复的笔记" bind:this={recoveryElement}>
@@ -563,6 +597,10 @@
   }
   button:hover:not(:disabled) {
     background: var(--selected);
+  }
+  .tools button[aria-pressed="true"] {
+    background: var(--selected);
+    color: var(--accent);
   }
   .search {
     display: flex;

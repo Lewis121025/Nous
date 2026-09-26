@@ -26,6 +26,9 @@ class SourceRenderer {
     this.newline = source.includes("\r\n") ? "\r\n" : "\n";
   }
 
+  // 换行转换一律用 (?<!\r)\n：源码保留块（frontmatter 等）的文本内部自带
+  // CRLF，盲替换会产出 \r\r\n，保存的往返校验随即失败。
+
   render(previous: SourceNode, current: PmNode): string {
     if (previous.node.eq(current)) return this.source.slice(previous.start, previous.end);
     if (previous.implicit) {
@@ -158,7 +161,7 @@ class SourceRenderer {
       {
         start: range.start + start - previous.start,
         end: range.start + end - previous.start,
-        text: escaped.replace(/\n/g, this.newline),
+        text: escaped.replace(/(?<!\r)\n/g, this.newline),
       },
     ]);
   }
@@ -188,7 +191,7 @@ class SourceRenderer {
       {
         start: first.start - previous.start,
         end: last.end - previous.start,
-        text: text.replace(/\n/g, this.newline),
+        text: text.replace(/(?<!\r)\n/g, this.newline),
       },
     ]);
   }
@@ -235,7 +238,7 @@ class SourceRenderer {
         edits.push({
           start: range.start + start - previous.start,
           end: range.start + end - previous.start,
-          text: escaped.replace(/\n/g, this.newline),
+          text: escaped.replace(/(?<!\r)\n/g, this.newline),
         });
       }
       position += before.nodeSize;
@@ -256,7 +259,7 @@ class SourceRenderer {
     // 内容出现闭合围栏时必须扩大围栏，交由局部序列化处理，不能提前截断代码。
     if (current.textContent.split("\n").some((line) => line.trimStart().startsWith(marker)))
       return null;
-    return opening[0] + current.textContent.replace(/\n/g, this.newline) + closing[0];
+    return opening[0] + current.textContent.replace(/(?<!\r)\n/g, this.newline) + closing[0];
   }
 
   private inlineSource(context: PmNode, content: Fragment | readonly PmNode[]): string {
@@ -323,14 +326,16 @@ class SourceRenderer {
     const continuation = /^[\s>*+\-\d.()[\]xX]*$/.test(prefix)
       ? prefix.replace(/[^\s>]/g, " ")
       : "";
-    return text.replace(/\n/g, `${this.newline}${continuation}`);
+    return text.replace(/(?<!\r)\n/g, `${this.newline}${continuation}`);
   }
 
   private renderDocument(previous: SourceNode, current: PmNode): string {
     const before = previous.children;
     const after = current.content.content;
     if (before.length === 0)
-      return serializeMarkdown(current).replace(/\n$/, "").replace(/\n/g, this.newline);
+      return serializeMarkdown(current)
+        .replace(/\n$/, "")
+        .replace(/(?<!\r)\n/g, this.newline);
     let prefix = 0;
     while (prefix < before.length && prefix < after.length && sameAt(before, prefix, after, prefix))
       prefix++;

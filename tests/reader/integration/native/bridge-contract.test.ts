@@ -47,7 +47,15 @@ it("所有阅读器响应在进入调用方前校验，错误元数据不能冒�
     { read: () => api.vaultList(), invalid: ["note.md", false] },
     { read: () => api.vaultEntries(), invalid: [{ path: "note.md", kind: "unknown" }] },
     { read: () => api.sessionGetPanes(), invalid: { filesCollapsed: false } },
-    { read: () => api.sessionSetCurrent(null), invalid: { status: "failed" } },
+    {
+      read: () =>
+        api.sessionSetDocuments({
+          panes: [{ currentPath: null, history: { back: [], forward: [] } }],
+          active: 0,
+          split: false,
+        }),
+      invalid: { status: "failed" },
+    },
     { read: () => api.entryCreate("new.md", "file"), invalid: {} },
     { read: () => api.entryTrash("note.md"), invalid: { warning: false } },
     { read: () => api.entryRename("note.md", "new.md"), invalid: { warning: {} } },

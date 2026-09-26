@@ -12,22 +12,24 @@ type Definitions = ReadonlyMap<string, Definition>;
 /**
  * 把 Markdown 映射为文档，引用定义与脚注等未支持的节点也必须保留。
  *
+ * 独立成段的 `![[笔记]]` 在顶层、引用块与列表项内都提升为嵌入块；
+ * 嵌套深度与循环的控制在嵌入视图层执行（见 `note-embed-view`），
+ * 解析层始终产出完整结构。
+ *
  * @param source Markdown 原文。
- * @param options `embeds` 为 false 时不把独立的 `![[笔记]]` 提升成嵌入块，用来渲染嵌入内容自身，避免互相嵌入时递归。
  * @returns schema 约束下的文档节点。
  * @throws 语法无法被处理器承载时失败，禁止静默丢弃内容。
  */
-export function parseMarkdown(source: string, options?: { embeds?: boolean }): PmNode {
+export function parseMarkdown(source: string): PmNode {
   const tree = markdownProcessor.parse(source);
   const definitions = new Map<string, Definition>();
   collectDefinitions(tree, definitions);
-  const blocks = tree.children.map((node) => mapBlock(node, definitions));
-  const lifted = options?.embeds === false ? blocks : blocks.map(liftTopLevelEmbed);
+  const lifted = tree.children.map((node) => mapBlock(node, definitions)).map(liftEmbedParagraph);
   return documentSchema.node("doc", null, lifted.length === 0 ? [paragraph()] : lifted);
 }
 
-/** 顶层只含一条笔记嵌入的段落提升为块；列表项仍必须从段落开始，不在这里提升。 */
-function liftTopLevelEmbed(block: PmNode): PmNode {
+/** 只含一条笔记嵌入的段落提升为嵌入块；句中嵌入保持链接，避免拆开句子。 */
+function liftEmbedParagraph(block: PmNode): PmNode {
   if (block.type.name !== "paragraph") return block;
   return noteEmbedFromParagraph(block) ?? block;
 }
@@ -56,7 +58,9 @@ function mapBlock(node: RootContent, definitions: Definitions): PmNode {
     case "paragraph":
       return paragraph(mapPhrasing(node.children, definitions));
     case "blockquote": {
-      const children = node.children.map((child) => mapBlock(child, definitions));
+      const children = node.children
+        .map((child) => mapBlock(child, definitions))
+        .map(liftEmbedParagraph);
       return documentSchema.node(
         "blockquote",
         null,
@@ -65,9 +69,12 @@ function mapBlock(node: RootContent, definitions: Definitions): PmNode {
     }
     case "list": {
       const items = node.children.map((item) => {
-        const children = item.children.map((child) => mapBlock(child, definitions));
-        // list_item 必须以段落开始，空首项与以子列表开头的项也遵循相同约束。
-        if (children[0]?.type.name !== "paragraph") children.unshift(paragraph());
+        const children = item.children
+          .map((child) => mapBlock(child, definitions))
+          .map(liftEmbedParagraph);
+        // 列表项以段落或嵌入块开始；空首项与以子列表开头的项补空段落。
+        const first = children[0]?.type.name;
+        if (first !== "paragraph" && first !== "note_embed") children.unshift(paragraph());
         return documentSchema.node(
           "list_item",
           {

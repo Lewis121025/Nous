@@ -105,13 +105,18 @@ test("built worker preserves directory entries, current paths and safe file oper
   assert.deepEqual(await core.call("vaultEntries"), [{ path: "项目", kind: "directory" }]);
   await core.call("entryCreate", "项目/笔记.md", "file");
   await core.call("fileWrite", "项目/笔记.md", bytes("saved note"), bytes(""));
-  await core.call("readerSessionPatch", { currentPath: "项目/笔记.md" });
+  await core.call("readerSessionPatch", {
+    documents: { panes: [{ currentPath: "项目/笔记.md", history: { back: [], forward: [] } }], active: 0, split: false },
+  });
   assert.deepEqual(await core.call("entryRename", "项目", "资料"), { warning: null });
   assert.deepEqual(await core.call("vaultEntries"), [
     { path: "资料", kind: "directory" },
     { path: "资料/笔记.md", kind: "file" },
   ]);
-  assert.equal((await core.call("readerSessionLoad")).currentPath, "资料/笔记.md");
+  assert.equal(
+    (await core.call("readerSessionLoad")).documents.panes[0]?.currentPath,
+    "资料/笔记.md",
+  );
   assert.equal(
     await realpath(await core.call("entryPath", "资料/笔记.md")),
     await realpath(join(root, "资料/笔记.md")),
@@ -246,6 +251,13 @@ test("built worker preserves native save, conflict, copy, rename and link contra
   assert.equal(renamedMentions.linked[0]?.toRaw, "b");
   await assert.rejects(core.call("fileRead", "absent.md"));
   assert.equal(text(await core.call("fileRead", "b.md")), "saved");
+
+  // 创建携带初始内容：同一独占事务提交；目录携带内容在写盘前拒绝。
+  await core.call("entryCreate", "种子.md", "file", bytes("# 计划\n\n"));
+  assert.equal(text(await core.call("fileRead", "种子.md")), "# 计划\n\n");
+  await assert.rejects(
+    core.call("entryCreate", "带内容目录", "directory", bytes("x")),
+  );
 });
 
 test("queued writes stay in their original vault and shutdown drains the final save", async (t) => {
@@ -261,7 +273,7 @@ test("queued writes stay in their original vault and shutdown drains the final s
   const readSecond = core.call("fileRead", "a.md");
   const saveSecond = core.call("fileWrite", "a.md", bytes("second saved"), bytes("original"));
   const remember = core.call("readerSessionPatch", {
-    currentPath: "a.md",
+    documents: { panes: [{ currentPath: "a.md", history: { back: [], forward: [] } }], active: 0, split: false },
     filesCollapsed: true,
     leftWidth: 240,
   });
@@ -283,8 +295,8 @@ test("queued writes stay in their original vault and shutdown drains the final s
   const { core: restored } = start();
   assert.deepEqual(await restored.call("vaultRestore"), {
     root: second,
-    currentPath: "a.md",
-    history: { back: [], forward: [] },
+    documents: { panes: [{ currentPath: "a.md", history: { back: [], forward: [] } }], active: 0, split: false },
+    sourceViews: [],
   });
   assert.equal((await restored.call("readerSessionLoad")).filesCollapsed, true);
   const panes = await restored.call("readerSessionLoad");
@@ -302,18 +314,58 @@ test("failed vault switches retain the active vault and previous session", async
   await writeFile(join(second, "a.md"), "second");
   const { core } = start();
   await core.call("vaultOpen", first);
-  await core.call("readerSessionPatch", { currentPath: "a.md" });
+  await core.call("readerSessionPatch", { documents: { panes: [{ currentPath: "a.md", history: { back: [], forward: [] } }], active: 0, split: false } });
   await assert.rejects(core.call("vaultOpen", join(second, "missing")));
   assert.equal(text(await core.call("fileRead", "a.md")), "first");
   const session = await core.call("readerSessionLoad");
   assert.equal(session.vaultRoot, first);
-  assert.equal(session.currentPath, "a.md");
+  assert.equal(session.documents.panes[0]?.currentPath, "a.md");
 
   const sessionPath = join(userData, "session.json");
   await rm(sessionPath);
   await mkdir(sessionPath);
   await assert.rejects(core.call("vaultOpen", second));
   assert.equal(text(await core.call("fileRead", "a.md")), "first");
+});
+
+test("未链接提及经原生线程就地转链接，过期区间被拒绝", async (t) => {
+  const {
+    roots: [root],
+    start,
+  } = await fixture(t);
+  await Promise.all([
+    writeFile(join(root, "目标.md"), "# 目标\n"),
+    writeFile(join(root, "ref.md"), "开头 目标 结尾\n"),
+  ]);
+  const { core } = start();
+  await core.call("vaultOpen", root);
+
+  const mentions = await core.call("indexMentionsTo", "目标.md");
+  const unlinked = mentions.unlinked[0];
+  assert.ok(unlinked);
+  assert.equal(unlinked.toRaw, "目标");
+  assert.deepEqual(
+    await core.call(
+      "mentionsLinkify",
+      "ref.md",
+      unlinked.startByte,
+      unlinked.endByte,
+      "目标",
+      "目标.md",
+    ),
+    { warning: null },
+  );
+  assert.equal(text(await core.call("fileRead", "ref.md")), "开头 [[目标]] 结尾\n");
+
+  // 同一区间再来一次：内容已变，必须拒绝且不再改写。
+  await assert.rejects(
+    core.call("mentionsLinkify", "ref.md", unlinked.startByte, unlinked.endByte, "目标", "目标.md"),
+  );
+  assert.equal(text(await core.call("fileRead", "ref.md")), "开头 [[目标]] 结尾\n");
+
+  const after = await core.call("indexMentionsTo", "目标.md");
+  assert.equal(after.unlinked.length, 0);
+  assert.equal(after.linked.length, 1);
 });
 
 test("链接消歧候选与标题锚点穿过原生解析", async (t) => {
@@ -408,6 +460,11 @@ test("检索与标题索引穿过原生线程，中文短词、标签与属性�
     byAttribute.map((hit) => hit.path),
     ["note.md"],
   );
+  // 全库标签清单：面板组树的数据源，标签升序。
+  assert.deepEqual(await core.call("indexTags"), [
+    { tag: "inline-tag", count: 1 },
+    { tag: "project", count: 1 },
+  ]);
   // 标题索引供锚点解析与补全。
   const headings = await core.call("indexHeadings", "note.md");
   assert.deepEqual(

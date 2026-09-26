@@ -28,9 +28,10 @@ function start(mentions: Mentions) {
   const target = document.createElement("div");
   document.body.append(target);
   const onOpen = vi.fn();
-  components.add(mount(BacklinksPane, { target, props: { mentions, onOpen } }));
+  const onLinkify = vi.fn();
+  components.add(mount(BacklinksPane, { target, props: { mentions, onOpen, onLinkify } }));
   flushSync();
-  return { target, onOpen };
+  return { target, onOpen, onLinkify };
 }
 
 afterEach(async () => {
@@ -66,5 +67,18 @@ describe("正文末尾的引用", () => {
     const { target } = start({ linked: [], unlinked: [] });
     expect(target.querySelector("section")).toBeNull();
     expect(target.textContent?.trim()).toBe("");
+  });
+
+  it("只有未链接提及带「转为链接」动作，点击回传整条提及", () => {
+    const linked = [mention("来源甲.md", 0)];
+    const unlinked = [mention("来源乙.md", 40, "unlinked")];
+    const { target, onLinkify } = start({ linked, unlinked });
+    const details = target.querySelectorAll("details");
+    for (const detail of details) detail.open = true;
+    flushSync();
+    const buttons = target.querySelectorAll<HTMLButtonElement>(".linkify");
+    expect(buttons).toHaveLength(1);
+    buttons[0]!.click();
+    expect(onLinkify).toHaveBeenCalledWith(unlinked[0]);
   });
 });

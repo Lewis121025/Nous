@@ -182,6 +182,44 @@ describe("侧栏全文搜索", () => {
     expect(document.activeElement).toBe(searchBox());
   });
 
+  it("标签面板组树展示，点击标签进入 tag: 检索", async () => {
+    const searchQuery = vi.fn(async (): Promise<SearchHit[]> => [
+      { path: "notes/beta.md", title: "Beta", snippet: "" },
+    ]);
+    const indexTags = vi.fn(async () => [
+      { tag: "project", count: 2 },
+      { tag: "project/nous", count: 1 },
+    ]);
+    await startList(createApi({ searchQuery, indexTags }));
+
+    target.querySelector<HTMLButtonElement>('[aria-label="浏览标签"]')!.click();
+    flushSync();
+    await settle();
+    flushSync();
+
+    const names = [...target.querySelectorAll(".tag .name")].map((node) => node.textContent);
+    expect(names).toEqual(["#project", "#nous"]);
+    // 文件树的行让位给标签面板（文件树行带 data-path，标签行没有）。
+    expect(target.querySelector('[role="treeitem"][data-path]')).toBeNull();
+
+    // 点击子标签：转成 tag: 谓词检索并展示结果。
+    const child = [...target.querySelectorAll<HTMLButtonElement>(".tag")].find((button) =>
+      button.textContent?.includes("nous"),
+    );
+    child!.click();
+    await settle();
+    flushSync();
+    expect(searchQuery).toHaveBeenCalledWith({
+      terms: [],
+      tags: ["project/nous"],
+      attributes: [],
+      pathContains: null,
+      limit: 100,
+    });
+    expect(searchBox().value).toBe("tag:project/nous");
+    expect(target.querySelector(".hit")).not.toBeNull();
+  });
+
   it("谓词查询进入结构化条件，纯空白回车不发起检索", async () => {
     const searchQuery = vi.fn(async (): Promise<SearchHit[]> => []);
     await startList(createApi({ searchQuery }));

@@ -229,10 +229,16 @@ fn duplicate_titles_stay_ambiguous_while_missing_targets_stay_dead() {
         }
     );
     let links = vault.links_from("ref.md").expect("出链");
-    let same = links.iter().find(|link| link.to_raw == "同名").expect("同名");
+    let same = links
+        .iter()
+        .find(|link| link.to_raw == "同名")
+        .expect("同名");
     assert_eq!(same.to_path, None);
     assert_eq!(same.resolution, LinkResolution::Ambiguous);
-    let missing = links.iter().find(|link| link.to_raw == "没有").expect("没有");
+    let missing = links
+        .iter()
+        .find(|link| link.to_raw == "没有")
+        .expect("没有");
     assert_eq!(missing.to_path, None);
     assert_eq!(missing.resolution, LinkResolution::Dead);
 }

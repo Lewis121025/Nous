@@ -73,19 +73,38 @@ it("保存确认严格区分提交、冲突和未知响应，警告不会丢失"
 });
 
 it("库与目录快照要求完整结构，不能把错误响应显示为空库或恢复文件夹", () => {
-  expect(parseVaultRestore({ root: "/笔记", currentPath: null })).toEqual({
+  const documents = {
+    panes: [{ currentPath: null, history: { back: [], forward: [] } }],
+    active: 0,
+    split: false,
+  };
+  expect(parseVaultRestore({ root: "/笔记", documents })).toEqual({
     root: "/笔记",
-    currentPath: null,
-    history: { back: [], forward: [] },
+    documents,
+    sourceViews: [],
   });
-  // 阅读栈随恢复响应归一化；损坏条目丢弃而不是拒绝整个恢复。
+  // 阅读栈与源码视图记忆随恢复响应归一化；损坏条目丢弃而不是拒绝整个恢复。
   expect(
     parseVaultRestore({
       root: "/笔记",
-      currentPath: null,
-      history: { back: [{ path: "a.md", anchor: "小节" }, { path: 5 }], forward: "junk" },
-    })?.history,
-  ).toEqual({ back: [{ path: "a.md", anchor: "小节" }], forward: [] });
+      documents: {
+        panes: [
+          {
+            currentPath: null,
+            history: { back: [{ path: "a.md", anchor: "小节" }, { path: 5 }], forward: "junk" },
+          },
+        ],
+        active: 0,
+        split: false,
+      },
+      sourceViews: ["b.md", 7, "", "b.md"],
+    }),
+  ).toMatchObject({
+    documents: {
+      panes: [{ history: { back: [{ path: "a.md", anchor: "小节" }], forward: [] } }],
+    },
+    sourceViews: ["b.md"],
+  });
   expect(parseVaultRestore(null)).toBeNull();
   expect(() => parseVaultRestore({ root: "/笔记" })).toThrow();
   const entries = [

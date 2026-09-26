@@ -2,13 +2,25 @@
 import { flushSync } from "svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReaderWorkspaceController } from "@reader/renderer/state/workspace.svelte";
-import type { LinkTarget, ReaderApi } from "@reader/shared/api";
+import type { LinkTarget, MentionRecord, ReaderApi } from "@reader/shared/api";
 import { createReaderApiMock } from "../../fixtures/reader-api-mock";
+
+const mentionRecord: MentionRecord = {
+  fromPath: "a/foo.md",
+  fromTitle: "A",
+  mtime: 1,
+  startByte: 7,
+  endByte: 13,
+  snippet: "开头 目标 结尾",
+  kind: "unlinked",
+  linkKind: null,
+  toRaw: "目标",
+};
 
 const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-function createApi(resolveResult: LinkTarget): ReaderApi {
+function createApi(resolveResult: LinkTarget, overrides: Partial<ReaderApi> = {}): ReaderApi {
   return createReaderApiMock({
     vaultEntries: vi.fn(async () => [
       { path: "a/foo.md", kind: "file" as const },
@@ -20,6 +32,7 @@ function createApi(resolveResult: LinkTarget): ReaderApi {
       draft: null,
     })),
     linksResolve: vi.fn(async () => resolveResult),
+    ...overrides,
   });
 }
 
@@ -55,7 +68,8 @@ describe("链接跳转的解析分支", () => {
     await workspace.openLink("wiki", "missing");
     await workspace.confirmDeadLink();
     await settle();
-    expect(api.entryCreate).toHaveBeenCalledWith("missing.md", "file");
+    // 无锚点的死链不种初始内容。
+    expect(api.entryCreate).toHaveBeenCalledWith("missing.md", "file", undefined);
     expect(workspace.document.path).toBe("missing.md");
     expect(workspace.deadLinkOffer).toBeNull();
   });
@@ -119,5 +133,71 @@ describe("链接跳转的解析分支", () => {
     await settle();
     expect(workspace.document.path).toBe("a/foo.md");
     expect(workspace.message).not.toContain("未找到标题");
+  });
+
+  it("死链创建把 # 标题锚点随创建事务写入，再挂起定位", async () => {
+    const entryCreate = vi.fn(async () => ({ warning: null }));
+    const workspace = await startWorkspace(createApi({ status: "dead" }, { entryCreate }));
+    await workspace.openLink("wiki", "new-note#计划");
+    expect(workspace.deadLinkOffer).toEqual({ path: "new-note.md", anchor: "计划" });
+
+    await workspace.confirmDeadLink();
+    await settle();
+
+    // 种子内容与创建是同一次独占提交，磁盘上没有空文件中间态。
+    expect(entryCreate).toHaveBeenCalledWith(
+      "new-note.md",
+      "file",
+      new TextEncoder().encode("# 计划\n\n"),
+    );
+    expect(workspace.document.path).toBe("new-note.md");
+    // 无编辑器可定位：挂起等待挂载兑现，不得误报锚点失效。
+    expect(workspace.message).not.toContain("未找到标题");
+    expect(workspace.deadLinkOffer).toBeNull();
+  });
+
+  it("放弃死链创建不写任何文件", async () => {
+    const entryCreate = vi.fn(async () => ({ warning: null }));
+    const workspace = await startWorkspace(createApi({ status: "dead" }, { entryCreate }));
+    await workspace.openLink("wiki", "new-note#计划");
+    workspace.dismissDeadLink();
+    expect(workspace.deadLinkOffer).toBeNull();
+    expect(entryCreate).not.toHaveBeenCalled();
+    expect(workspace.document.path).toBe("ref.md");
+  });
+});
+
+describe("未链接提及转链接", () => {
+  it("按区间与期望文本交给内核改写，成功后确认并刷新引用", async () => {
+    const mentionsLinkify = vi.fn(async () => ({ warning: null }));
+    const workspace = await startWorkspace(
+      createApi({ status: "dead" }, { mentionsLinkify }),
+    );
+    await workspace.linkifyMention(mentionRecord, "ref.md");
+    expect(mentionsLinkify).toHaveBeenCalledWith("a/foo.md", 7, 13, "目标", "ref.md");
+    expect(workspace.message).toContain("已把「目标」转为链接");
+  });
+
+  it("内核拒绝（区间过期）时如实报告，不伪装成功", async () => {
+    const mentionsLinkify = vi.fn(async (): Promise<{ warning: string | null }> => {
+      throw new Error("文件已被外部修改: a/foo.md");
+    });
+    const workspace = await startWorkspace(
+      createApi({ status: "dead" }, { mentionsLinkify }),
+    );
+    await workspace.linkifyMention(mentionRecord, "ref.md");
+    expect(workspace.message).toContain("转为链接失败");
+    expect(workspace.message).toContain("文件已被外部修改");
+    expect(workspace.messageNeedsAttention).toBe(true);
+  });
+
+  it("提交后的索引警告并入提示，不当作失败", async () => {
+    const mentionsLinkify = vi.fn(async () => ({ warning: "索引刷新失败：磁盘忙" }));
+    const workspace = await startWorkspace(
+      createApi({ status: "dead" }, { mentionsLinkify }),
+    );
+    await workspace.linkifyMention(mentionRecord, "ref.md");
+    expect(workspace.message).toContain("已转为链接");
+    expect(workspace.message).toContain("索引刷新失败");
   });
 });

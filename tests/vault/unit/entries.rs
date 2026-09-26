@@ -27,10 +27,16 @@ fn lists_empty_directories_and_notifies_directory_only_changes() {
 #[test]
 fn creation_is_exclusive_and_rejects_hidden_escape_and_missing_parent() {
     let (root, _state, vault) = setup();
-    vault.create_entry("项目", EntryKind::Directory).unwrap();
-    vault.create_entry("项目/笔记.md", EntryKind::File).unwrap();
+    vault
+        .create_entry("项目", EntryKind::Directory, b"")
+        .unwrap();
+    vault
+        .create_entry("项目/笔记.md", EntryKind::File, b"")
+        .unwrap();
     fs::write(root.path().join("项目/笔记.md"), "保留内容").unwrap();
-    assert!(vault.create_entry("项目/笔记.md", EntryKind::File).is_err());
+    assert!(vault
+        .create_entry("项目/笔记.md", EntryKind::File, b"")
+        .is_err());
     assert_eq!(vault.read("项目/笔记.md").unwrap(), "保留内容".as_bytes());
     for path in [
         "../越界.md",
@@ -42,7 +48,10 @@ fn creation_is_exclusive_and_rejects_hidden_escape_and_missing_parent() {
         "项目/Lpt1.txt",
         " 前导空格.md",
     ] {
-        assert!(vault.create_entry(path, EntryKind::File).is_err(), "{path}");
+        assert!(
+            vault.create_entry(path, EntryKind::File, b"").is_err(),
+            "{path}"
+        );
     }
     assert!(vault.snapshot("项目/笔记.md").unwrap().draft.is_none());
 }
@@ -62,7 +71,9 @@ fn creation_preserves_missing_parents_of_recoverable_drafts() {
     fs::remove_dir_all(root.path().join("folder.md")).unwrap();
     vault.refresh_index().unwrap();
 
-    assert!(vault.create_entry("folder.md", EntryKind::File).is_err());
+    assert!(vault
+        .create_entry("folder.md", EntryKind::File, b"")
+        .is_err());
     assert!(!root.path().join("folder.md").exists());
     assert_eq!(
         vault
@@ -74,14 +85,14 @@ fn creation_preserves_missing_parents_of_recoverable_drafts() {
         b"recoverable editing"
     );
     vault
-        .create_entry("folder.md", EntryKind::Directory)
+        .create_entry("folder.md", EntryKind::Directory, b"")
         .unwrap();
     assert!(root.path().join("folder.md").is_dir());
     assert!(vault
-        .create_entry("folder.md/note.md", EntryKind::Directory)
+        .create_entry("folder.md/note.md", EntryKind::Directory, b"")
         .is_err());
     vault
-        .create_entry("folder.md-other.md", EntryKind::File)
+        .create_entry("folder.md-other.md", EntryKind::File, b"")
         .unwrap();
 }
 
@@ -92,7 +103,7 @@ fn creation_reserves_normalized_draft_paths() {
         .write("./note.md", b"recoverable edits", Some(b"deleted"))
         .unwrap();
     for kind in [EntryKind::File, EntryKind::Directory] {
-        assert!(vault.create_entry("note.md", kind).is_err());
+        assert!(vault.create_entry("note.md", kind, b"").is_err());
     }
     assert!(!root.path().join("note.md").exists());
     assert_eq!(
@@ -104,7 +115,7 @@ fn creation_reserves_normalized_draft_paths() {
 #[test]
 fn rename_rejects_invisible_or_reserved_destinations_before_changing_files() {
     let (_root, _state, vault) = setup();
-    vault.create_entry("笔记.md", EntryKind::File).unwrap();
+    vault.create_entry("笔记.md", EntryKind::File, b"").unwrap();
     for target in [".隐藏.md", "CON.md", "新建/aux.txt", "尾部."] {
         assert!(vault.rename("笔记.md", target).is_err(), "{target}");
         assert_eq!(vault.read("笔记.md").unwrap(), b"");
@@ -114,7 +125,7 @@ fn rename_rejects_invisible_or_reserved_destinations_before_changing_files() {
 #[test]
 fn trash_failure_preserves_files_and_pending_drafts_block_trash() {
     let (root, _state, vault) = setup();
-    vault.create_entry("笔记.md", EntryKind::File).unwrap();
+    vault.create_entry("笔记.md", EntryKind::File, b"").unwrap();
     let result = vault.trash_entry("笔记.md", |_| {
         Err(Error::Io(std::io::Error::other("废纸篓不可用")))
     });
@@ -173,8 +184,12 @@ fn blocked_draft_only_prevents_trashing_its_own_path_or_ancestors() {
 fn trash_updates_inventory_and_never_accepts_the_vault_root() {
     let (root, _state, vault) = setup();
     let trash = TempDir::new().unwrap();
-    vault.create_entry("项目", EntryKind::Directory).unwrap();
-    vault.create_entry("项目/笔记.md", EntryKind::File).unwrap();
+    vault
+        .create_entry("项目", EntryKind::Directory, b"")
+        .unwrap();
+    vault
+        .create_entry("项目/笔记.md", EntryKind::File, b"")
+        .unwrap();
     vault
         .trash_entry("项目", |path| {
             fs::rename(path, trash.path().join("项目")).map_err(Error::from)
@@ -258,7 +273,7 @@ fn symlinks_never_escape_the_vault_and_block_partial_folder_moves() {
     symlink(outside.path(), root.path().join("folder/.linked")).unwrap();
     assert!(vault.entry_path("folder/.linked/original.md").is_err());
     assert!(vault
-        .create_entry("folder/.linked/new.md", EntryKind::File)
+        .create_entry("folder/.linked/new.md", EntryKind::File, b"")
         .is_err());
     assert!(vault
         .trash_entry("folder/.linked", |_| panic!("不应传入符号链接"))
@@ -285,4 +300,23 @@ fn special_files_do_not_break_browsing_but_prevent_incomplete_folder_moves() {
     assert!(vault.rename("folder", "moved").is_err());
     assert!(socket_path.exists());
     assert!(!root.path().join("moved").exists());
+}
+
+#[test]
+fn create_file_with_initial_content_is_exclusive_and_directory_rejects_content() {
+    let (root, _state, vault) = setup();
+    vault
+        .create_entry("种子.md", EntryKind::File, "# 计划\n\n".as_bytes())
+        .unwrap();
+    assert_eq!(vault.read("种子.md").unwrap(), "# 计划\n\n".as_bytes());
+    // 同名独占仍然生效，不覆盖已有内容。
+    assert!(vault
+        .create_entry("种子.md", EntryKind::File, b"other")
+        .is_err());
+    assert_eq!(vault.read("种子.md").unwrap(), "# 计划\n\n".as_bytes());
+    // 目录携带内容在写盘前拒绝。
+    assert!(vault
+        .create_entry("目录", EntryKind::Directory, b"x")
+        .is_err());
+    assert!(!root.path().join("目录").exists());
 }

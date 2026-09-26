@@ -5,7 +5,7 @@
  */
 
 import type { ImportedAttachment } from "./attachments";
-import type { SessionHistory } from "./session";
+import type { SessionDocuments } from "./session";
 
 /** 历史动作由当前输入表面执行，不建立独立于编辑器的撤销记录。 */
 export type HistoryAction = "undo" | "redo";
@@ -150,6 +150,14 @@ export type SearchHit = {
   snippet: string;
 };
 
+/** 全库标签计数的一行。 */
+export type TagCount = {
+  /** 规范化标签（小写、无 `#`）。 */
+  tag: string;
+  /** 携带该标签的文件数。 */
+  count: number;
+};
+
 /** 索引里的一条标题记录。 */
 export type HeadingRecord = {
   /** 源文件库内相对路径。 */
@@ -187,10 +195,10 @@ export type PaneLayout = {
 export type VaultRestore = {
   /** 库根绝对路径。 */
   root: string;
-  /** 上次打开的库内相对路径；没有或已删除为 `null`。 */
-  currentPath: string | null;
-  /** 上次会话的阅读栈；渲染端按当前文件列表过滤失效条目。 */
-  history: SessionHistory;
+  /** 上次会话的分栏文档与阅读栈；渲染端按当前文件列表过滤失效条目。 */
+  documents: SessionDocuments;
+  /** 上次会话记住源码视图的文件路径。 */
+  sourceViews: string[];
 };
 
 /** 打开文件时同时取回尚未提交的编辑，删除后的文件也能恢复。 */
@@ -235,10 +243,10 @@ export type ReaderApi = {
    * 没有可用会话时返回 `null`。
    */
   vaultRestore: () => Promise<VaultRestore | null>;
-  /** 把当前打开的相对路径写入会话；`null` 表示没有打开文件。 */
-  sessionSetCurrent: (path: string | null) => Promise<void>;
-  /** 持久化阅读栈；仅接受库内相对路径与文本锚点。 */
-  sessionSetHistory: (history: SessionHistory) => Promise<void>;
+  /** 持久化各分栏的当前文档、阅读栈与分栏布局；路径与条目由主进程校验。 */
+  sessionSetDocuments: (documents: SessionDocuments) => Promise<void>;
+  /** 持久化源码视图记忆；损坏条目由会话解析丢弃。 */
+  sessionSetSourceViews: (paths: string[]) => Promise<void>;
   /** 读取文件栏布局（宽度、收起）。 */
   sessionGetPanes: () => Promise<PaneLayout>;
   /** 记住文件栏布局；不能经此改库路径或当前文件。 */
@@ -249,8 +257,12 @@ export type ReaderApi = {
   vaultList: () => Promise<string[]>;
   /** 完整目录快照，包含空文件夹和恢复草稿。 */
   vaultEntries: () => Promise<VaultEntry[]>;
-  /** 独占创建空笔记或文件夹；同名时拒绝覆盖。 */
-  entryCreate: (path: string, kind: VaultEntry["kind"]) => Promise<RenameOutcome>;
+  /** 独占创建笔记或文件夹；`content` 是随创建事务写入的文件初始字节，同名时拒绝覆盖。 */
+  entryCreate: (
+    path: string,
+    kind: VaultEntry["kind"],
+    content?: Uint8Array,
+  ) => Promise<RenameOutcome>;
   /** 导入用户选择的字节到笔记旁；root 必须仍是活动库，同名文件自动避让。 */
   attachmentImport: (
     root: string,
@@ -289,12 +301,26 @@ export type ReaderApi = {
   indexLinksTo: (path: string) => Promise<LinkRecord[]>;
   /** 已链接与未链接提及。 */
   indexMentionsTo: (path: string) => Promise<Mentions>;
+  /**
+   * 把 `from` 文件里的未链接提及就地转为指向 `target` 的 wiki 链接。
+   *
+   * 区间与 `expected` 文本来自提及查询；文件已变化时内核拒绝改写。
+   */
+  mentionsLinkify: (
+    from: string,
+    startByte: number,
+    endByte: number,
+    expected: string,
+    target: string,
+  ) => Promise<RenameOutcome>;
   /** 出链。 */
   indexLinksFrom: (path: string) => Promise<LinkRecord[]>;
   /** 结构化全文搜索：正文词、标签、属性与路径谓词组合。 */
   searchQuery: (query: SearchQuery) => Promise<SearchHit[]>;
   /** 一篇文件的全部标题，按文档顺序；供锚点解析与标题补全。 */
   indexHeadings: (path: string) => Promise<HeadingRecord[]>;
+  /** 全库标签及计数，标签升序；供标签浏览面板。 */
+  indexTags: () => Promise<TagCount[]>;
   /** 改名并更新链接。 */
   entryRename: (from: string, to: string) => Promise<RenameOutcome>;
   /**

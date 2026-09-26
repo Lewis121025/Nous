@@ -95,7 +95,7 @@
     <button
       class="reader-button format-button"
       type="button"
-      popovertarget="editor-formatting"
+      popovertarget="editor-formatting-{workspace.activePane.id}"
       aria-label="文本格式"
       title="文本格式"
       onclick={onDocumentAction}
@@ -117,6 +117,20 @@
       disabled={workspace.switching || workspace.copying}
       ><svg class="reader-icon" viewBox="0 0 24 24" aria-hidden="true"
         ><path d="m8 8-4 4 4 4M16 8l4 4-4 4M13 6l-2 12" /></svg
+      ></button
+    >
+  {/if}
+  {#if workspace.vaultRoot !== null}
+    <button
+      class="reader-button icon-button"
+      type="button"
+      aria-label={workspace.split ? "合并分栏" : "拆分为两栏"}
+      aria-pressed={workspace.split}
+      title={workspace.split ? "合并分栏" : "拆分为两栏"}
+      onclick={() => void workspace.toggleSplit()}
+      disabled={workspace.switching || workspace.copying || workspace.isComposing}
+      ><svg class="reader-icon" viewBox="0 0 24 24" aria-hidden="true"
+        ><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M12 5v14" /></svg
       ></button
     >
   {/if}

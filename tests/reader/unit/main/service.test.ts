@@ -25,14 +25,27 @@ const { native, session } = vi.hoisted(() => ({
 
 vi.mock("node:module", () => ({ createRequire: () => () => native }));
 
+function documents(
+  currentPath: string | null,
+  history: {
+    back: { path: string; anchor: string | null }[];
+    forward: { path: string; anchor: string | null }[];
+  } = {
+    back: [],
+    forward: [],
+  },
+) {
+  return { panes: [{ currentPath, history }], active: 0, split: false };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   session.loadSession.mockReturnValue({
     vaultRoot: "/first",
-    currentPath: "a.md",
+    documents: documents("a.md"),
     filesCollapsed: false,
     leftWidth: 232,
-    history: { back: [], forward: [] },
+    sourceViews: [],
   });
 });
 
@@ -66,17 +79,17 @@ describe("文件操作与会话提交", () => {
     expect(native.attachmentImport).toHaveBeenCalledTimes(1);
   });
 
-  it("移动父文件夹后会话跟随子文件，阅读栈同口径迁移，成功通知只触发一次", () => {
+  it("移动父文件夹后会话跟随子文件，阅读栈与源码视图记忆同口径迁移，成功通知只触发一次", () => {
     session.loadSession.mockReturnValue({
       vaultRoot: "/notes",
-      currentPath: "old/sub/note.md",
-      history: {
+      documents: documents("old/sub/note.md", {
         back: [
           { path: "old/a.md", anchor: null },
           { path: "keep.md", anchor: "小节" },
         ],
         forward: [{ path: "old/sub/note.md", anchor: null }],
-      },
+      }),
+      sourceViews: ["old/sub/view.md"],
     });
     native.entryRename.mockReturnValue({});
     const changed = vi.fn();
@@ -87,14 +100,14 @@ describe("文件操作与会话提交", () => {
     expect(service.entryRename("old", "new")).toEqual({ warning: null });
     expect(session.saveSession).toHaveBeenCalledWith({
       vaultRoot: "/notes",
-      currentPath: "new/sub/note.md",
-      history: {
+      documents: documents("new/sub/note.md", {
         back: [
           { path: "new/a.md", anchor: null },
           { path: "keep.md", anchor: "小节" },
         ],
         forward: [{ path: "new/sub/note.md", anchor: null }],
-      },
+      }),
+      sourceViews: ["new/sub/view.md"],
     });
     expect(changed).toHaveBeenCalledTimes(1);
   });
@@ -106,26 +119,29 @@ describe("文件操作与会话提交", () => {
       save: session.saveSession,
     });
     session.loadSession.mockReturnValue({
-      currentPath: "old-archive/note.md",
-      history: { back: [], forward: [] },
+      documents: documents("old-archive/note.md"),
+      sourceViews: [],
     });
     service.entryTrash("old");
     expect(session.saveSession).not.toHaveBeenCalled();
     session.loadSession.mockReturnValue({
-      currentPath: "old/sub/note.md",
-      history: { back: [{ path: "old/sub/other.md", anchor: null }], forward: [] },
+      documents: documents("old/sub/note.md", {
+        back: [{ path: "old/sub/other.md", anchor: null }],
+        forward: [],
+      }),
+      sourceViews: ["old/sub/view.md"],
     });
     service.entryTrash("old");
     expect(session.saveSession).toHaveBeenCalledWith({
-      currentPath: null,
-      history: { back: [], forward: [] },
+      documents: documents(null),
+      sourceViews: [],
     });
   });
 
   it("会话写入失败作为提交后警告，不把已经移动的文件报告成失败", () => {
     session.loadSession.mockReturnValue({
-      currentPath: "old/note.md",
-      history: { back: [], forward: [] },
+      documents: documents("old/note.md"),
+      sourceViews: [],
     });
     session.saveSession.mockImplementationOnce(() => {
       throw new Error("disk full");

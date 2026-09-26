@@ -3,15 +3,17 @@ import { externalUrl } from "../shared/link-target";
 import type { PaneLayout } from "../shared/api";
 import { parseAttachmentRequest, type AttachmentReply } from "../shared/attachments";
 import { parseDraftRequest, type DraftReply } from "../shared/editor-recovery";
-import { parseSessionHistory } from "../shared/session";
+import { parseSourceViews } from "../shared/session";
 import type { ReaderService } from "./service";
 import {
+  parseByteArgument,
   parseEntryKind,
   parseLinkKindArgument,
   parseLinkText,
-  parseNullableRelativePath,
+  parseOptionalBytes,
   parsePaneLayoutMessage,
   parsePathArgument,
+  parseSessionDocumentsMessage,
   parseSearchQueryArgument,
   parseWriteRequest,
 } from "../shared/reader-protocol";
@@ -48,13 +50,12 @@ export function registerReaderIpc(getWindow: () => BrowserWindow | null, core: R
 
   ipcMain.handle("reader.vault.restore", () => core.call("vaultRestore"));
 
-  ipcMain.handle("reader.session.setCurrent", (_event, path: unknown) => {
-    const currentPath = parseNullableRelativePath(path);
-    return core.call("readerSessionPatch", { currentPath });
-  });
+  ipcMain.handle("reader.session.setDocuments", (_event, documents: unknown) =>
+    core.call("readerSessionPatch", { documents: parseSessionDocumentsMessage(documents) }),
+  );
 
-  ipcMain.handle("reader.session.setHistory", (_event, history: unknown) =>
-    core.call("readerSessionPatch", { history: parseSessionHistory(history) }),
+  ipcMain.handle("reader.session.setSourceViews", (_event, paths: unknown) =>
+    core.call("readerSessionPatch", { sourceViews: parseSourceViews(paths) }),
   );
 
   ipcMain.handle("reader.session.getPanes", async (): Promise<PaneLayout> => {
@@ -70,8 +71,13 @@ export function registerReaderIpc(getWindow: () => BrowserWindow | null, core: R
   ipcMain.handle("reader.vault.close", () => core.call("vaultClose"));
   ipcMain.handle("reader.vault.list", () => core.call("vaultList"));
   ipcMain.handle("reader.vault.entries", () => core.call("vaultEntries"));
-  ipcMain.handle("reader.entry.create", (_event, path: unknown, kind: unknown) =>
-    core.call("entryCreate", parsePathArgument(path), parseEntryKind(kind)),
+  ipcMain.handle("reader.entry.create", (_event, path: unknown, kind: unknown, content: unknown) =>
+    core.call(
+      "entryCreate",
+      parsePathArgument(path),
+      parseEntryKind(kind),
+      parseOptionalBytes(content),
+    ),
   );
   ipcMain.handle("reader.entry.trash", (_event, path: unknown) =>
     core.call("entryTrash", parsePathArgument(path)),
@@ -167,12 +173,32 @@ export function registerReaderIpc(getWindow: () => BrowserWindow | null, core: R
   ipcMain.handle("reader.index.mentionsTo", (_event, path: unknown) =>
     core.call("indexMentionsTo", parsePathArgument(path)),
   );
+  ipcMain.handle(
+    "reader.index.linkifyMention",
+    (
+      _event,
+      from: unknown,
+      startByte: unknown,
+      endByte: unknown,
+      expected: unknown,
+      target: unknown,
+    ) =>
+      core.call(
+        "mentionsLinkify",
+        parsePathArgument(from),
+        parseByteArgument(startByte),
+        parseByteArgument(endByte),
+        parseLinkText(expected),
+        parsePathArgument(target),
+      ),
+  );
   ipcMain.handle("reader.search.query", (_event, query: unknown) =>
     core.call("searchQuery", parseSearchQueryArgument(query)),
   );
   ipcMain.handle("reader.index.headings", (_event, path: unknown) =>
     core.call("indexHeadings", parsePathArgument(path)),
   );
+  ipcMain.handle("reader.index.tags", () => core.call("indexTags"));
   ipcMain.handle("reader.entry.rename", (_event, from: unknown, to: unknown) =>
     core.call("entryRename", parsePathArgument(from), parsePathArgument(to)),
   );

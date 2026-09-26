@@ -10,12 +10,13 @@ import type {
   SavedCopy,
   SearchHit,
   SearchQuery,
+  TagCount,
   VaultEntry,
   VaultRestore,
   WriteResult,
 } from "./api";
 import { SIDEBAR_LAYOUT } from "./api";
-import { parseSessionHistory } from "./session";
+import { parseSessionDocuments, parseSourceViews, type SessionDocuments } from "./session";
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -39,6 +40,12 @@ function byteOffset(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+/** 字节偏移参数必须是非负安全整数；损坏区间不能进入内核改写。 */
+export function parseByteArgument(value: unknown): number {
+  if (!byteOffset(value)) throw new Error("提及定位范围无效");
+  return value;
+}
+
 /** 校验跨进程路径参数的类型；相对路径、符号链接与库根约束仍由内核统一执行。 */
 export function parsePathArgument(value: unknown): string {
   if (!path(value)) throw new Error("文件路径必须是非空文本且不含空字符");
@@ -49,6 +56,12 @@ export function parsePathArgument(value: unknown): string {
 export function parseFileBytes(value: unknown): Uint8Array {
   if (!(value instanceof Uint8Array)) throw new Error("文件内容不是有效字节");
   return value;
+}
+
+/** 可选字节内容；`null`/`undefined` 视为缺席，其余按严格字节校验。 */
+export function parseOptionalBytes(value: unknown): Uint8Array | undefined {
+  if (value === null || value === undefined) return undefined;
+  return parseFileBytes(value);
 }
 
 /** 保存必须携带目标字节和明确的磁盘基准；null 仅表示预期文件不存在。 */
@@ -94,12 +107,6 @@ export function parseNullablePath(value: unknown): string | null {
   return value === null ? null : parsePathArgument(value);
 }
 
-/** 当前文档和已解析链接必须是规范库内相对路径；拒绝绝对路径与跳出库根的分量。 */
-export function parseNullableRelativePath(value: unknown): string | null {
-  if (value === null || relativePath(value)) return value;
-  throw new Error("当前文档或链接响应包含无效的库内路径");
-}
-
 /**
  * 链接解析响应按状态判别：resolved 必须带有效库内路径，ambiguous 必须带
  * 非空候选列表；空锚点归一化为 null，损坏响应整体拒绝而不是退化成死链。
@@ -125,20 +132,44 @@ export function parseLinkTarget(value: unknown): LinkTarget {
   throw new Error("链接解析响应无效");
 }
 
-/** 恢复库路径与当前文档必须来自同一个完整响应；无效响应抛错，不伪装成空库。 */
+/**
+ * 校验渲染进程写回的文档会话。
+ *
+ * 会话文件可以宽容损坏条目；这条通道相反：缺栏或非法路径必须拒绝，
+ * 否则空对象会把当前笔记清空。
+ *
+ * @param value IPC 传入的未知值。
+ * @returns 归一化后的分栏会话。
+ * @throws 不是对象、没有分栏数组，或某栏路径不合法时抛出。
+ */
+export function parseSessionDocumentsMessage(value: unknown): SessionDocuments {
+  if (!record(value) || !Array.isArray(value.panes)) throw new Error("文档会话无效");
+  const documents = parseSessionDocuments(value);
+  for (const pane of documents.panes) {
+    if (pane.currentPath !== null && !relativePath(pane.currentPath))
+      throw new Error("文档会话包含无效路径");
+  }
+  return documents;
+}
+
+/** 恢复库路径与文档会话必须来自同一个完整响应；无效响应抛错，不伪装成空库。 */
 export function parseVaultRestore(value: unknown): VaultRestore | null {
   if (value === null) return null;
-  if (
-    record(value) &&
-    path(value.root) &&
-    (value.currentPath === null || relativePath(value.currentPath))
-  )
+  if (record(value) && path(value.root)) {
+    if (!record(value.documents)) throw new Error("笔记库恢复响应无效，请重新打开笔记库");
+    const documents = parseSessionDocuments(value.documents);
+    // 分栏路径必须是规范库内相对路径；损坏时整体拒绝而不是丢栏。
+    for (const pane of documents.panes) {
+      if (pane.currentPath !== null && !relativePath(pane.currentPath))
+        throw new Error("笔记库恢复响应无效，请重新打开笔记库");
+    }
     return {
       root: value.root,
-      currentPath: value.currentPath,
-      // 阅读栈是恢复性数据：损坏条目按会话解析规则丢弃，不拒绝整个恢复。
-      history: parseSessionHistory(value.history),
+      documents,
+      // 视图记忆是恢复性数据：损坏条目按会话解析规则丢弃，不拒绝整个恢复。
+      sourceViews: parseSourceViews(value.sourceViews),
     };
+  }
   throw new Error("笔记库恢复响应无效，请重新打开笔记库");
 }
 
@@ -332,6 +363,23 @@ export function parseSearchHits(value: unknown): SearchHit[] {
     )
       throw new Error("检索命中包含无效路径、标题或摘要");
     return { path: item.path, title: item.title, snippet: item.snippet };
+  });
+}
+
+/** 标签计数逐项校验；损坏数据整体拒绝，不渲染半份清单。 */
+export function parseTagCounts(value: unknown): TagCount[] {
+  if (!Array.isArray(value)) throw new Error("标签清单响应无效");
+  return value.map((item: unknown) => {
+    if (
+      !record(item) ||
+      typeof item.tag !== "string" ||
+      item.tag === "" ||
+      typeof item.count !== "number" ||
+      !Number.isSafeInteger(item.count) ||
+      item.count < 0
+    )
+      throw new Error("标签清单包含无效的标签或计数");
+    return { tag: item.tag, count: item.count };
   });
 }
 

@@ -18,6 +18,22 @@ export type DeadLinkOffer = {
 };
 
 /**
+ * 死链笔记的初始内容：`#标题` 锚点写成首个标题，创建后锚点立即可解析，
+ * 不再产出「打开即报锚点失效」的空文件。
+ *
+ * 块引用（`^`）不是标题、非 Markdown 目标没有标题语义，均不种内容。
+ * 确认对话框的文案与工作区的创建共用本判定，避免两处口径漂移。
+ *
+ * @param offer 死链创建位置与锚点。
+ * @returns 创建事务的初始字节；不种内容时为 `null`。
+ */
+export function deadLinkSeed(offer: DeadLinkOffer): Uint8Array | null {
+  if (offer.anchor === null || offer.anchor.startsWith("^")) return null;
+  if (!offer.path.toLowerCase().endsWith(".md")) return null;
+  return new TextEncoder().encode(`# ${offer.anchor}\n\n`);
+}
+
+/**
  * 从链接原文算出可创建的路径。
  *
  * @param from 当前笔记的库内路径。

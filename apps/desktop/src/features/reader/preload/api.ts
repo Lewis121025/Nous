@@ -15,6 +15,7 @@ import {
   parsePaneLayoutMessage,
   parseSavedCopy,
   parseSearchHits,
+  parseTagCounts,
   parseVaultEntries,
   parseVaultList,
   parseVaultRestore,
@@ -28,10 +29,10 @@ export function createReaderApi(): ReaderApi {
       parseEmptyReply(await ipcRenderer.invoke("reader.links.openExternal", url)),
     vaultOpen: async () => parseNullablePath(await ipcRenderer.invoke("reader.vault.open")),
     vaultRestore: async () => parseVaultRestore(await ipcRenderer.invoke("reader.vault.restore")),
-    sessionSetCurrent: async (path) =>
-      parseEmptyReply(await ipcRenderer.invoke("reader.session.setCurrent", path)),
-    sessionSetHistory: async (history) =>
-      parseEmptyReply(await ipcRenderer.invoke("reader.session.setHistory", history)),
+    sessionSetDocuments: async (documents) =>
+      parseEmptyReply(await ipcRenderer.invoke("reader.session.setDocuments", documents)),
+    sessionSetSourceViews: async (paths) =>
+      parseEmptyReply(await ipcRenderer.invoke("reader.session.setSourceViews", paths)),
     sessionGetPanes: async () =>
       parsePaneLayoutMessage(await ipcRenderer.invoke("reader.session.getPanes")),
     sessionSetPanes: async (panes) =>
@@ -39,8 +40,10 @@ export function createReaderApi(): ReaderApi {
     vaultClose: async () => parseEmptyReply(await ipcRenderer.invoke("reader.vault.close")),
     vaultList: async () => parseVaultList(await ipcRenderer.invoke("reader.vault.list")),
     vaultEntries: async () => parseVaultEntries(await ipcRenderer.invoke("reader.vault.entries")),
-    entryCreate: async (path, kind) =>
-      parseEntryOutcome(await ipcRenderer.invoke("reader.entry.create", path, kind)),
+    entryCreate: async (path, kind, content) =>
+      parseEntryOutcome(
+        await ipcRenderer.invoke("reader.entry.create", path, kind, content ?? null),
+      ),
     entryTrash: async (path) =>
       parseEntryOutcome(await ipcRenderer.invoke("reader.entry.trash", path)),
     entryReveal: async (path) =>
@@ -66,12 +69,24 @@ export function createReaderApi(): ReaderApi {
       parseLinkRecords(await ipcRenderer.invoke("reader.index.linksTo", path)),
     indexMentionsTo: async (path) =>
       parseMentions(await ipcRenderer.invoke("reader.index.mentionsTo", path)),
+    mentionsLinkify: async (from, startByte, endByte, expected, target) =>
+      parseEntryOutcome(
+        await ipcRenderer.invoke(
+          "reader.index.linkifyMention",
+          from,
+          startByte,
+          endByte,
+          expected,
+          target,
+        ),
+      ),
     indexLinksFrom: async (path) =>
       parseLinkRecords(await ipcRenderer.invoke("reader.index.linksFrom", path)),
     searchQuery: async (query) =>
       parseSearchHits(await ipcRenderer.invoke("reader.search.query", query)),
     indexHeadings: async (path) =>
       parseHeadingRecords(await ipcRenderer.invoke("reader.index.headings", path)),
+    indexTags: async () => parseTagCounts(await ipcRenderer.invoke("reader.index.tags")),
     entryRename: async (from, to) =>
       parseEntryOutcome(await ipcRenderer.invoke("reader.entry.rename", from, to)),
     subscribeVaultChanged: (callback) => {

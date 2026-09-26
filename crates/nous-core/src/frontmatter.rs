@@ -1,17 +1,22 @@
 //! frontmatter（YAML）到标签与属性的映射。
 //!
-//! v1 建模范围（刻意收窄，不做投机泛化）：
+//! 建模范围：
 //!
 //! * 只解析顶层映射；非映射文档不产出任何数据。
 //! * `tags` / `tag` 键进标签索引：接受标量字符串（按逗号切分）或标量序列，
 //!   元素去除前导 `#`、统一小写；空元素与纯数字元素丢弃（与行内标签共享
 //!   「必须含字母」规则）。不做行内标签的字符集校验——用户显式声明的
 //!   属性值按原文规范化。
-//! * 其余键进属性索引：标量（字符串/数字/布尔）与标量序列（每元素一行）；
-//!   嵌套映射、空值跳过，不建模。
+//! * 其余键进属性索引：标量（字符串/数字/布尔）一行；标量序列每元素一行
+//!   （同键多行）；嵌套映射展平为点路径键（`author.name`）；含复合元素的
+//!   序列按下标展平（`list.0.name`）。展平深度以 4 段键为限，更深的结构
+//!   跳过——防止恶意文档把索引撑爆。空值跳过。
 //! * TOML frontmatter 不解析，维持源码保留。
 
 use yaml_rust2::Yaml;
+
+/// 展平后的属性键最多段数（`a.b.c.d`）；更深的结构不建模。
+const MAX_KEY_DEPTH: usize = 4;
 
 /// 一篇笔记 frontmatter 产出的标签与属性行。
 pub(crate) struct FrontmatterData {
@@ -87,14 +92,41 @@ fn push_tag(tags: &mut Vec<String>, raw: &str) {
 }
 
 fn collect_attributes(key: &str, value: &Yaml, attributes: &mut Vec<(String, String)>) {
+    flatten_attribute(key, value, attributes, 1);
+}
+
+/// 按深度展平一个属性值；`depth` 是当前键的段数。
+fn flatten_attribute(key: &str, value: &Yaml, out: &mut Vec<(String, String)>, depth: usize) {
     match value {
-        Yaml::Array(items) => {
-            for item in items {
-                push_attribute(attributes, key, item);
+        Yaml::Hash(map) => {
+            if depth >= MAX_KEY_DEPTH {
+                return;
+            }
+            for (child_key, child) in map {
+                let Yaml::String(child_key) = child_key else {
+                    continue;
+                };
+                flatten_attribute(&format!("{key}.{child_key}"), child, out, depth + 1);
             }
         }
-        Yaml::Hash(_) | Yaml::BadValue | Yaml::Alias(_) => {}
-        scalar => push_attribute(attributes, key, scalar),
+        Yaml::Array(items) => {
+            // 全标量序列保持「同键每元素一行」的既有语义；含复合元素的
+            // 序列按下标展平，避免丢失结构。
+            let flat = items
+                .iter()
+                .all(|item| !matches!(item, Yaml::Hash(_) | Yaml::Array(_) | Yaml::Alias(_)));
+            if flat {
+                for item in items {
+                    push_attribute(out, key, item);
+                }
+            } else if depth < MAX_KEY_DEPTH {
+                for (index, item) in items.iter().enumerate() {
+                    flatten_attribute(&format!("{key}.{index}"), item, out, depth + 1);
+                }
+            }
+        }
+        Yaml::BadValue | Yaml::Alias(_) => {}
+        scalar => push_attribute(out, key, scalar),
     }
 }
 

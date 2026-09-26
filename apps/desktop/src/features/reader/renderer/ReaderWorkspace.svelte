@@ -2,7 +2,7 @@
   import { flushSync, onMount, tick, untrack, type Snippet } from "svelte";
   import ReaderToolbar from "./components/workspace/ReaderToolbar.svelte";
   import FileList from "./components/files/FileList.svelte";
-  import DocumentSurface from "./components/workspace/DocumentSurface.svelte";
+  import PaneColumn from "./components/workspace/PaneColumn.svelte";
   import FileEntryDialog from "./components/files/FileEntryDialog.svelte";
   import LinkCandidatesDialog from "./components/workspace/LinkCandidatesDialog.svelte";
   import DeadLinkDialog from "./components/workspace/DeadLinkDialog.svelte";
@@ -20,14 +20,14 @@
   const readerApi = untrack(() => api);
   const workspace = new ReaderWorkspaceController(readerApi);
   const mediaIo = createBrowserMediaIo(readerApi);
-  const doc = workspace.document;
+  // 活动栏文档：命令门禁与重命名等操作的目标随活动栏切换。
+  const doc = $derived(workspace.document);
   let filesCollapsed = $state(false);
   let narrow = $state(false);
   let leftWidth = $state(SIDEBAR_LAYOUT.leftWidth);
   let entryDialog: FileEntryDialog | undefined = $state();
   let fileList: FileList | undefined = $state();
   let toolbar: ReaderToolbar | undefined = $state();
-  let mainPane: HTMLElement | undefined = $state();
 
   /** 组词与切换期间消费但不执行命令；模态输入框保留自身历史，不修改背后的正文。 */
   export function executeHistory(action: HistoryAction): boolean {
@@ -93,16 +93,6 @@
 
   onMount(() => {
     updateViewport();
-    // 阅读栈的滚动捕获/恢复绑定到主滚动区；恢复等待新文档渲染完成，
-    // 避免滚动值先被旧内容高度钳制。
-    workspace.history.attachScroll({
-      capture: () => mainPane?.scrollTop ?? null,
-      apply: (top) => {
-        void tick().then(() => {
-          if (mainPane) mainPane.scrollTop = top;
-        });
-      },
-    });
     const dispose = workspace.start();
     void (async () => {
       await restorePanes();
@@ -254,7 +244,7 @@
     onDocumentAction={prepareDocumentAction}
     {applicationMenu}
   />
-  <div class="panes" inert={workspace.switching}>
+  <div class="panes">
     {#if !filesCollapsed}
       <button class="files-scrim" type="button" aria-label="收起文件栏" onclick={closeFilesPane}
       ></button>
@@ -271,52 +261,17 @@
         persistPanes();
       }}
     />
-    <section class="main" bind:this={mainPane} inert={narrow && !filesCollapsed}>
-      <div class:document-body={doc.content?.kind === "markdown"}>
-        {#if doc.path !== null}
-          <DocumentSurface {workspace} {mediaIo} />
-        {:else}
-          <div class="welcome">
-            <h1>
-              {workspace.vaultRoot === null
-                ? "你的笔记，安静地在这里。"
-                : workspace.files.length === 0
-                  ? "从第一篇笔记开始"
-                  : "留一点空间，给新的想法。"}
-            </h1>
-            <p>
-              {workspace.vaultRoot === null
-                ? "打开一个本地文件夹，开始阅读和写作。"
-                : workspace.files.length === 0
-                  ? "创建笔记后，就可以直接开始写作。"
-                  : "打开已有笔记，或写下此刻的想法。"}
-            </p>
-            {#if workspace.vaultRoot === null}
-              <button
-                type="button"
-                class="reader-button primary"
-                onclick={() => void workspace.openVault()}
-                disabled={workspace.switching}>打开笔记库…</button
-              >
-            {:else}
-              <div class="welcome-actions">
-                <button
-                  class="reader-button primary"
-                  type="button"
-                  onclick={() => fileList?.beginCreate("file")}
-                  disabled={workspace.switching}>新建笔记</button
-                >
-                {#if filesCollapsed}
-                  <button class="reader-button" type="button" onclick={toggleFilesPane}
-                    >显示文件栏</button
-                  >
-                {/if}
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </div>
-    </section>
+    {#each workspace.panes as pane (pane.id)}
+      <PaneColumn
+        {workspace}
+        {pane}
+        {mediaIo}
+        narrowInert={narrow && !filesCollapsed}
+        {filesCollapsed}
+        onToggleFiles={toggleFilesPane}
+        onNewNote={() => fileList?.beginCreate("file")}
+      />
+    {/each}
   </div>
   {#if workspace.deadLinkOffer !== null}
     <DeadLinkDialog
@@ -355,47 +310,11 @@
   .files-scrim {
     display: none;
   }
-  .main {
-    /* 查找栏复用滚动区内边距，吸顶时对齐真实视口边缘。 */
-    --reader-inset: 1.5rem;
-    flex: 1 1 auto;
-    overflow: auto;
-    min-width: 0;
-    min-height: 0;
-    padding: var(--reader-inset);
-  }
-  .document-body {
-    max-width: var(--reading-width);
-    margin: 0 auto;
-    padding: 0.5rem 0 1.5rem;
-  }
-  .welcome {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 60vh;
-    padding: 3rem 1.5rem;
-    text-align: center;
-  }
-  .welcome h1 {
-    font-size: 1.5rem;
-    font-weight: 500;
-  }
-  .welcome p {
-    color: var(--muted);
-    margin: 0 0 1.5rem;
-  }
-  .welcome-actions {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 0.65rem;
+  /* 分栏之间的视觉分隔；相邻选择器跨组件实例，需要全局作用域。 */
+  .panes :global(.main + .main) {
+    border-left: 1px solid var(--border);
   }
   @media (max-width: 640px) {
-    .main {
-      --reader-inset: 1rem;
-    }
     .panes {
       position: relative;
     }

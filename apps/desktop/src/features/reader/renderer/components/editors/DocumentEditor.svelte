@@ -48,6 +48,7 @@
   import EditorSearch from "./EditorSearch.svelte";
   import EditorAttachments from "./EditorAttachments.svelte";
   import LinkSuggestPopup from "./LinkSuggestPopup.svelte";
+  import PropertiesPanel from "./PropertiesPanel.svelte";
   import {
     createAttachmentEditing,
     type AttachmentProgress,
@@ -85,6 +86,14 @@
     onOutline: (items: OutlineItem[]) => void;
     /** 注册/注销序列化入口。 */
     register: (api: MarkdownEditorApi | null) => void;
+    /**
+     * 格式面板 DOM id。
+     *
+     * 工具栏的 Aa 用 popovertarget 指向它；分栏同时挂载多篇文档时必须各不相同。
+     */
+    formattingId?: string;
+    /** 本栏是否为活动栏。失去活动时关闭格式面板，避免弹层还作用在背后那一栏。 */
+    active?: boolean;
     /** 库内链接候选；仅用于交互，不参与文档挂载依赖。 */
     linkTargets?: string[];
     /**
@@ -111,6 +120,8 @@
     register,
     linkTargets = [],
     suggestHeadings,
+    formattingId = "editor-formatting",
+    active = true,
   }: Props = $props();
   let host: HTMLDivElement | undefined = $state();
   let editor = $state.raw<EditorView | null>(null);
@@ -239,6 +250,11 @@
     showSearch = true;
     searchPanel?.focusQuery();
   }
+
+  // 活动栏切走后，已打开的格式面板仍绑定着这一栏的编辑器，必须关掉。
+  $effect(() => {
+    if (!active) formattingPanel?.dismiss();
+  });
 
   $effect(() => {
     const el = host;
@@ -428,6 +444,7 @@
 {#if editor !== null && editorState !== null}
   <EditorFormatting
     bind:this={formattingPanel}
+    id={formattingId}
     view={editor}
     state={editorState}
     onLink={() => (showLink = true)}
@@ -457,6 +474,7 @@
       targets={linkTargets}
       onClose={() => (showLink = false)}
     />{/if}
+  <PropertiesPanel view={editor} state={editorState} />
 {/if}
 <div class="surface" bind:this={host}></div>
 {#if suggest !== null && suggest.items.length > 0}

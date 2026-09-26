@@ -10,12 +10,15 @@
   import { canInsertAttachment } from "../../engine/editing/attachments";
 
   let {
+    id = "editor-formatting",
     view,
     state: editorState,
     onLink,
     onAttachment,
     onOpenChange,
   }: {
+    /** 面板 DOM id。分栏时各栏必须不同，工具栏才能把弹层指到活动栏。 */
+    id?: string;
     view: EditorView;
     state: EditorState;
     onLink: () => void;
@@ -82,9 +85,9 @@
   }
 </script>
 
-<!-- 工作区只挂载一篇文档；顶部 Aa 通过原生 popovertarget 管理展开与焦点返回。 -->
+<!-- 顶部 Aa 通过原生 popovertarget 指向本栏；id 由调用方按分栏区分。 -->
 <div
-  id="editor-formatting"
+  {id}
   popover="auto"
   class="reader-popover formatting-panel"
   bind:this={panel}

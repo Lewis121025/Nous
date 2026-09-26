@@ -141,6 +141,17 @@ test("侧栏全文搜索：长词、中文短词、标签谓词与命中定位",
     expect(await search.inputValue()).toBe("");
     expect(await files.getByRole("treeitem").first().isVisible()).toBe(true);
 
+    // 标签面板：组树展示计数（frontmatter 与行内标签同表汇总），点击进入 tag: 检索。
+    await files.getByRole("button", { name: "浏览标签" }).click();
+    await expect.poll(async () => files.locator(".tag .name").allTextContents()).toEqual([
+      "#project",
+    ]);
+    await expect.poll(async () => files.locator(".tag .count").allTextContents()).toEqual(["2"]);
+    await files.locator(".tag", { hasText: "project" }).click();
+    await files.locator(".hit").first().waitFor();
+    expect((await hitPaths()).sort()).toEqual(["notes/量子.md", "设计笔记.md"]);
+    expect(await search.inputValue()).toBe("tag:project");
+
     expect(errors).toEqual([]);
   } finally {
     await app.close();

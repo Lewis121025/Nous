@@ -60,7 +60,8 @@ const nodes: Record<string, NodeSpec> = {
     toDOM: (node) => ["ol", { start: node.attrs["order"] as number }, 0],
   },
   list_item: {
-    content: "paragraph block*",
+    // 嵌入块可以打头：`- ![[笔记]]` 这类列表项整体就是一条嵌入。
+    content: "(paragraph | note_embed) block*",
     attrs: {
       checked: { default: null, validate: "boolean|null" },
       spread: { default: false, validate: "boolean" },

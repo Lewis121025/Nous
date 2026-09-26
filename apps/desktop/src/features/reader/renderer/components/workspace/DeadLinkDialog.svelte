@@ -1,8 +1,10 @@
 <script lang="ts">
   /**
    * 死链创建确认：路径已按链接原文算好，取消不写文件。
+   * 文案与创建共用 `deadLinkSeed` 判定，承诺的种子内容与实际写入一致。
    */
   import { onMount } from "svelte";
+  import { deadLinkSeed } from "../../engine/navigation/dead-link";
 
   let {
     path,
@@ -21,6 +23,7 @@
   } = $props();
 
   let dialog: HTMLDialogElement;
+  const seeded = $derived(anchor !== null && deadLinkSeed({ path, anchor }) !== null);
 
   onMount(() => {
     dialog.showModal();
@@ -40,7 +43,9 @@
   <h2 id="dead-link-title">笔记不存在</h2>
   <p class="hint">
     创建 <span class="path">{path}</span>？
-    {#if anchor !== null}
+    {#if seeded && anchor !== null}
+      将写入标题「{anchor}」，打开后直接定位。
+    {:else if anchor !== null}
       新笔记是空的，打开后会尝试定位到{anchor.startsWith("^") ? "块" : "标题"}「{anchor}」。
     {/if}
   </p>

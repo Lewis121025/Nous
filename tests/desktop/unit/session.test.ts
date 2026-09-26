@@ -38,10 +38,14 @@ describe("应用与阅读器会话", () => {
       window,
       reader: {
         vaultRoot: "/notes",
-        currentPath: "a.md",
+        documents: {
+          panes: [{ currentPath: "a.md", history: { back: [], forward: [] } }],
+          active: 0,
+          split: false,
+        },
         leftWidth: 230,
         filesCollapsed: true,
-        history: { back: [], forward: [] },
+        sourceViews: [],
       },
     });
   });
@@ -49,7 +53,15 @@ describe("应用与阅读器会话", () => {
     const session = {
       ...emptySession,
       appearance: "light" as const,
-      reader: { ...emptyReaderSession, vaultRoot: "/new", currentPath: "new.md" },
+      reader: {
+        ...emptyReaderSession,
+        vaultRoot: "/new",
+        documents: {
+          panes: [{ currentPath: "new.md", history: { back: [], forward: [] } }],
+          active: 0,
+          split: false,
+        },
+      },
     };
     expect(
       parseSession(JSON.stringify({ ...session, vaultRoot: "/old", currentPath: "old.md" })),
@@ -66,7 +78,15 @@ describe("应用与阅读器会话", () => {
   });
   it("应用设置与阅读器状态可以独立持久化，互不覆盖", () => {
     const file = temporaryFile();
-    const reader = { ...emptyReaderSession, vaultRoot: "/notes", currentPath: "a.md" };
+    const reader = {
+      ...emptyReaderSession,
+      vaultRoot: "/notes",
+      documents: {
+        panes: [{ currentPath: "a.md", history: { back: [], forward: [] } }],
+        active: 0,
+        split: false,
+      },
+    };
     patchSession(file, { reader });
     for (const appearance of ["system", "light", "dark"] as const) {
       patchSession(file, { appearance });

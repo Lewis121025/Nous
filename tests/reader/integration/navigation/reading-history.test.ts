@@ -37,8 +37,8 @@ afterEach(() => {
 
 describe("阅读栈导航", () => {
   it("打开文件依次入栈，后退与前进按浏览器语义移动", async () => {
-    const sessionSetHistory = vi.fn(async () => {});
-    const workspace = await startWorkspace(createApi({ sessionSetHistory }));
+    const sessionSetDocuments = vi.fn(async () => {});
+    const workspace = await startWorkspace(createApi({ sessionSetDocuments }));
     await workspace.openFile("a.md");
     await workspace.openFile("b.md");
     await workspace.openFile("c.md");
@@ -62,8 +62,9 @@ describe("阅读栈导航", () => {
     await settle();
     expect(workspace.history.canForward).toBe(false);
 
-    // 每次移动都持久化快照。
-    const last = sessionSetHistory.mock.calls.at(-1)?.[0] as SessionHistory;
+    // 每次移动都持久化快照（活动栏的阅读栈随文档会话写入）。
+    const last = sessionSetDocuments.mock.calls.at(-1)?.[0]?.panes[0]
+      ?.history as SessionHistory;
     expect(last.back.map((entry) => entry.path)).toEqual(["a.md", "b.md"]);
   });
 
@@ -83,14 +84,23 @@ describe("阅读栈导航", () => {
       createApi({
         vaultRestore: vi.fn(async () => ({
           root: "/notes",
-          currentPath: "b.md",
-          history: {
-            back: [
-              { path: "gone.md", anchor: null },
-              { path: "a.md", anchor: null },
+          documents: {
+            panes: [
+              {
+                currentPath: "b.md",
+                history: {
+                  back: [
+                    { path: "gone.md", anchor: null },
+                    { path: "a.md", anchor: null },
+                  ],
+                  forward: [],
+                },
+              },
             ],
-            forward: [],
+            active: 0,
+            split: false,
           },
+          sourceViews: [],
         })),
       }),
     );

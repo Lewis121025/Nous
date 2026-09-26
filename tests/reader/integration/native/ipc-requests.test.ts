@@ -50,12 +50,24 @@ it("错误字节和缺失基准在 IPC 入口被拒绝，不进入保存或副�
 });
 
 it("错误会话参数不能清空当前路径或重置布局，额外字段不能修改库路径", async () => {
-  await expect(invoke("reader.session.setCurrent", {})).rejects.toThrow("路径");
-  await expect(invoke("reader.session.setCurrent", undefined)).rejects.toThrow("路径");
+  await expect(invoke("reader.session.setDocuments", {})).rejects.toThrow("文档会话");
+  await expect(invoke("reader.session.setDocuments", undefined)).rejects.toThrow("文档会话");
+  await expect(
+    invoke("reader.session.setDocuments", {
+      panes: [{ currentPath: "../逃逸.md", history: { back: [], forward: [] } }],
+      active: 0,
+      split: false,
+    }),
+  ).rejects.toThrow("路径");
   await expect(invoke("reader.session.setPanes", {})).rejects.toThrow("布局");
   expect(call).not.toHaveBeenCalled();
-  await invoke("reader.session.setCurrent", null);
-  expect(call).toHaveBeenLastCalledWith("readerSessionPatch", { currentPath: null });
+  const documents = {
+    panes: [{ currentPath: null, history: { back: [], forward: [] } }],
+    active: 0,
+    split: false,
+  };
+  await invoke("reader.session.setDocuments", documents);
+  expect(call).toHaveBeenLastCalledWith("readerSessionPatch", { documents });
   await invoke("reader.session.setPanes", {
     filesCollapsed: true,
     leftWidth: 240,
@@ -65,6 +77,9 @@ it("错误会话参数不能清空当前路径或重置布局，额外字段不�
     filesCollapsed: true,
     leftWidth: 240,
   });
+  // 源码视图记忆逐项校验：非文本与空串丢弃，不整体拒绝。
+  await invoke("reader.session.setSourceViews", ["a.md", 5, "", "a.md"]);
+  expect(call).toHaveBeenLastCalledWith("readerSessionPatch", { sourceViews: ["a.md"] });
 });
 
 it("读取、预览、索引和文件操作统一拒绝错误路径与未知种类", async () => {
@@ -115,4 +130,23 @@ it("检索条件在 IPC 入口结构化校验，超界上限被收敛后才进�
     pathContains: null,
     limit: 500,
   });
+});
+
+it("提及转链接的区间与文本在 IPC 入口校验后才进入内核", async () => {
+  await expect(invoke("reader.index.linkifyMention", {}, 0, 1, "文本", "目标.md")).rejects.toThrow(
+    "路径",
+  );
+  await expect(
+    invoke("reader.index.linkifyMention", "ref.md", -1, 1, "文本", "目标.md"),
+  ).rejects.toThrow("范围");
+  await expect(
+    invoke("reader.index.linkifyMention", "ref.md", 0, 1.5, "文本", "目标.md"),
+  ).rejects.toThrow("范围");
+  await expect(invoke("reader.index.linkifyMention", "ref.md", 0, 1, 5, "目标.md")).rejects.toThrow(
+    "文本",
+  );
+  expect(call).not.toHaveBeenCalled();
+  // 库根约束由内核统一执行；IPC 层与其他路径参数同一口径。
+  await invoke("reader.index.linkifyMention", "ref.md", 0, 6, "目标", "目标.md");
+  expect(call).toHaveBeenLastCalledWith("mentionsLinkify", "ref.md", 0, 6, "目标", "目标.md");
 });

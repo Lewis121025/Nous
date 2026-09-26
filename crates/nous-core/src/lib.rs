@@ -28,7 +28,7 @@ mod wiki;
 pub use attachments::{ImportedAttachment, MAX_ATTACHMENT_BYTES};
 pub use entries::{EntryKind, VaultEntry};
 pub use error::Error;
-pub use index::HeadingRecord;
+pub use index::{HeadingRecord, TagCount};
 pub use link::{LinkKind, LinkRecord, LinkResolution, LinkTarget};
 pub use mention::{MentionKind, MentionRecord, Mentions};
 pub use pathutil::path_to_slashes;

@@ -12,8 +12,10 @@
     mentions: Mentions;
     /** 打开来源并定位到该次出现。 */
     onOpen: (mention: MentionRecord) => void;
+    /** 把未链接提及就地转为指向本笔记的链接；已链接提及没有此动作。 */
+    onLinkify?: (mention: MentionRecord) => void;
   };
-  let { mentions, onOpen }: Props = $props();
+  let { mentions, onOpen, onLinkify }: Props = $props();
   const linkedGroups = $derived(presentMentions(mentions.linked, { query: "", sort: "pathAsc" }));
   const unlinkedGroups = $derived(
     presentMentions(mentions.unlinked, { query: "", sort: "pathAsc" }),
@@ -54,13 +56,13 @@
     {#if unlinkedGroups.length > 0}
       <details class="suggestions">
         <summary>可能相关的提及（{unlinkedGroups.length} 篇）</summary>
-        {@render groups(unlinkedGroups)}
+        {@render groups(unlinkedGroups, true)}
       </details>
     {/if}
   </section>
 {/if}
 
-{#snippet groups(items: MentionGroup[])}
+{#snippet groups(items: MentionGroup[], linkifyable = false)}
   <div class="groups">
     {#each items as group (group.fromPath)}
       <div class="group">
@@ -74,6 +76,14 @@
                   {#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}
                 {/each}
               </button>
+              {#if linkifyable && onLinkify}
+                <button
+                  type="button"
+                  class="linkify"
+                  title="把来源文件里的这段文字就地替换为指向本笔记的链接"
+                  onclick={() => onLinkify?.(item)}>转为链接</button
+                >
+              {/if}
             </li>
           {/each}
         </ul>
@@ -143,5 +153,21 @@
     color: var(--fg);
     background: transparent;
     font-weight: 500;
+  }
+  .linkify {
+    display: block;
+    margin: 0.1rem 0 0.35rem 0.5rem;
+    padding: 0.15rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 0.35rem;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+  .linkify:hover {
+    color: var(--accent);
+    border-color: var(--accent);
   }
 </style>

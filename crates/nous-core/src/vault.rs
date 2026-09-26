@@ -153,14 +153,7 @@ impl Vault {
             files: file_rows,
             mut links,
             derived,
-        } = collect_refresh_rows(
-            &self.root,
-            &files,
-            &mtimes,
-            &by_path,
-            &links_by,
-            stale_scan,
-        )?;
+        } = collect_refresh_rows(&self.root, &files, &mtimes, &by_path, &links_by, stale_scan)?;
         let inventory = identity_inventory(&files, &file_rows, &mut aliases, &removals, &derived);
         // 标题和别名变了也要重绑其它文件的链接，不能只在文件集合变化时重算。
         for link in &mut links {
@@ -360,6 +353,80 @@ impl Vault {
         Ok(Mentions { linked, unlinked })
     }
 
+    /// 把未链接提及就地转为 wiki 链接。
+    ///
+    /// `[start_byte, end_byte)` 区间必须仍是 `expected` 文本——区间来自
+    /// 查询时的扫描，文件外部变更后宁可拒绝也不能按过期偏移改写。
+    /// 替换文本按「唯一解析的最短形态」生成，正文其余字节保持不变；
+    /// 提及文本与目标显示名不同时以别名保留原句。
+    ///
+    /// # Errors
+    ///
+    /// 目标不在库内、非 Markdown 源、区间无效或与 `expected` 不符
+    /// （[`Error::FileChanged`]）、读盘或写盘失败时返回错误。
+    pub fn linkify_mention(
+        &self,
+        from: &str,
+        start_byte: i64,
+        end_byte: i64,
+        expected: &str,
+        target: &str,
+    ) -> Result<crate::rename::RenameOutcome, Error> {
+        if !is_markdown(from) {
+            return Err(Error::Io(io::Error::other("只有 Markdown 支持转为链接")));
+        }
+        let _guard = self.lock_writes()?;
+        let inventory = {
+            let guard = self.lock_inventory()?;
+            guard
+                .as_ref()
+                .ok_or_else(|| Error::Io(io::Error::other("库尚未完成扫描")))?
+                .clone()
+        };
+        if !inventory.set.contains(target) {
+            return Err(Error::NotFound {
+                path: self.root().join(target),
+            });
+        }
+        let path = resolve_in_root(self.root(), from)?;
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::NotFound { path });
+            }
+            Err(err) => return Err(Error::Io(err)),
+        };
+        let changed = || Error::FileChanged { path: path.clone() };
+        let start = usize::try_from(start_byte).map_err(|_| changed())?;
+        let end = usize::try_from(end_byte).map_err(|_| changed())?;
+        if start > end {
+            return Err(changed());
+        }
+        let current = bytes
+            .get(start..end)
+            .and_then(|slice| std::str::from_utf8(slice).ok())
+            .unwrap_or("");
+        if current != expected {
+            return Err(changed());
+        }
+        let replacement = wiki_link_text(expected, target, &inventory);
+        let mut out = Vec::with_capacity(bytes.len() - (end - start) + replacement.len());
+        out.extend_from_slice(&bytes[..start]);
+        out.extend_from_slice(replacement.as_bytes());
+        out.extend_from_slice(&bytes[end..]);
+        let staged = crate::save::stage(&path, &out)?;
+        staged
+            .persist(&path)
+            .map_err(|err| Error::Io(io::Error::other(err.error.to_string())))?;
+        crate::save::sync_parent(&path)?;
+        // 写盘已成事实；索引刷新失败降级为警告，与其余入口操作同一口径。
+        let warning = match self.reindex_written(from, &out) {
+            Ok(()) => None,
+            Err(error) => Some(format!("链接已写入，索引刷新失败：{error}")),
+        };
+        Ok(crate::rename::RenameOutcome { warning })
+    }
+
     fn mentions_from_links(
         &self,
         links: &[LinkRecord],
@@ -463,6 +530,16 @@ impl Vault {
     pub fn headings(&self, path: &str) -> Result<Vec<HeadingRecord>, Error> {
         let conn = self.lock_conn()?;
         index::load_headings(&conn, path)
+    }
+
+    /// 全库标签及计数，标签升序；供标签浏览面板。
+    ///
+    /// # Errors
+    ///
+    /// 索引查询失败。
+    pub fn tag_counts(&self) -> Result<Vec<crate::index::TagCount>, Error> {
+        let conn = self.lock_conn()?;
+        index::load_tag_counts(&conn)
     }
 
     /// 结构化全文搜索；条件语义见 [`SearchQuery`]。
@@ -571,7 +648,10 @@ impl Inventory {
     }
 }
 
-fn wiki_map(files: &[String], extra: &HashMap<String, Vec<String>>) -> HashMap<String, Vec<String>> {
+fn wiki_map(
+    files: &[String],
+    extra: &HashMap<String, Vec<String>>,
+) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for file in files {
         let path = Path::new(file);
@@ -878,6 +958,58 @@ fn resolve_wiki(inventory: &Inventory, raw: &str) -> WikiHits {
             WikiHits::Many(candidates)
         }
         None => WikiHits::None,
+    }
+}
+
+/// 唯一解析到 `target` 的最短 wiki 目标形态。
+///
+/// Markdown 目标先试裸词干，再试去 `.md` 的路径，最后全路径；
+/// 非 Markdown 目标先试文件名，再全路径。都歧义时保持全路径，
+/// 宁可长也不制造新的歧义链接。
+fn wiki_target_form(inventory: &Inventory, target: &str) -> String {
+    let path = Path::new(target);
+    let full = target.to_string();
+    let mut candidates: Vec<String> = Vec::new();
+    if is_markdown(target) {
+        if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) {
+            if let Ok(stem_path) = path_to_slashes(&path.with_file_name(&stem)) {
+                candidates.push(stem);
+                candidates.push(stem_path);
+            }
+        }
+    } else if let Some(name) = path
+        .file_name()
+        .map(|part| part.to_string_lossy().into_owned())
+    {
+        candidates.push(name);
+    }
+    candidates.push(full.clone());
+    candidates
+        .into_iter()
+        .find(|form| matches!(resolve_wiki(inventory, form), WikiHits::One(hit) if hit == full))
+        .unwrap_or(full)
+}
+
+/// 提及替换成的链接文本：提及与目标显示名一致时 `[[目标]]`，
+/// 否则 `[[目标|提及原文]]` 保留原句；括号与和号由实体编码保护，
+/// 别名里的 `|` 按「首个分隔符」解析规则仍属于别名。
+fn wiki_link_text(mention_text: &str, target: &str, inventory: &Inventory) -> String {
+    let form = wiki_target_form(inventory, target);
+    let encoded = crate::wiki::encode_text(&form);
+    let path = Path::new(target);
+    let display = if is_markdown(target) {
+        path.file_stem()
+    } else {
+        path.file_name()
+    }
+    .map_or_else(
+        || target.to_string(),
+        |part| part.to_string_lossy().into_owned(),
+    );
+    if mention_text == display {
+        format!("[[{encoded}]]")
+    } else {
+        format!("[[{encoded}|{}]]", crate::wiki::encode_text(mention_text))
     }
 }
 

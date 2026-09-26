@@ -20,8 +20,7 @@ pub(crate) fn push_key(keys: &mut Vec<String>, raw: &str) {
 
 /// `#` 会变成锚点，`|` 与方括号会截断 wiki 语法，这些键无法被点名。
 fn is_wiki_key(key: &str) -> bool {
-    !key
-        .chars()
+    !key.chars()
         .any(|character| matches!(character, '#' | '|' | '[' | ']' | '\n' | '\r'))
 }
 

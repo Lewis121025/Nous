@@ -42,21 +42,29 @@ describe("阅读器会话边界", () => {
         forward: [{ path: "c.md" }],
       },
     });
-    expect(parsed.history).toEqual({
+    expect(parsed.documents.panes[0]?.history).toEqual({
       back: [
         { path: "a.md", anchor: "小节" },
         { path: "b.md", anchor: null },
       ],
       forward: [{ path: "c.md", anchor: null }],
     });
-    expect(parseReaderSession({}).history).toEqual({ back: [], forward: [] });
+    expect(parseReaderSession({}).documents.panes[0]?.history).toEqual({ back: [], forward: [] });
     // 超长历史被截到上限，会话文件不随导航无限增长。
     const long = Array.from({ length: 150 }, (_, index) => ({
       path: `f${index}.md`,
       anchor: null,
     }));
-    expect(parseReaderSession({ history: { back: long, forward: [] } }).history.back).toHaveLength(
-      100,
-    );
+    expect(
+      parseReaderSession({ history: { back: long, forward: [] } }).documents.panes[0]?.history.back,
+    ).toHaveLength(100);
+  });
+  it("源码视图记忆去重、丢弃非文本并截到上限", () => {
+    expect(parseReaderSession({ sourceViews: ["a.md", 5, "", "a.md"] }).sourceViews).toEqual([
+      "a.md",
+    ]);
+    const many = Array.from({ length: 600 }, (_, index) => `f${index}.md`);
+    expect(parseReaderSession({ sourceViews: many }).sourceViews).toHaveLength(500);
+    expect(parseReaderSession({}).sourceViews).toEqual([]);
   });
 });

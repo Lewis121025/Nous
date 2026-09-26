@@ -48,7 +48,15 @@ beforeEach(() => {
     ["other.md", encode("other\n")],
   ]);
   api = {
-    vaultRestore: vi.fn(async () => ({ root: "/notes", currentPath: "note.md", history: { back: [], forward: [] } })),
+    vaultRestore: vi.fn(async () => ({
+      root: "/notes",
+      documents: {
+        panes: [{ currentPath: "note.md", history: { back: [], forward: [] } }],
+        active: 0,
+        split: false,
+      },
+      sourceViews: [],
+    })),
     vaultOpen: vi.fn(async () => null),
     vaultClose: vi.fn(async () => {}),
     vaultList: vi.fn(async () => [...disk.keys()]),
@@ -56,7 +64,10 @@ beforeEach(() => {
       (await api.vaultList()).map((path) => ({ path, kind: "file" as const })),
     ),
     entryCreate: vi.fn(async () => ({ warning: null })),
-    attachmentImport: vi.fn(async (_root, _from, name) => ({ path: `attachments/${name}`, warning: null })),
+    attachmentImport: vi.fn(async (_root, _from, name) => ({
+      path: `attachments/${name}`,
+      warning: null,
+    })),
     entryTrash: vi.fn(async () => ({ warning: null })),
     entryReveal: vi.fn(async () => {}),
     fileRead: vi.fn(async (path) => disk.get(path)!),
@@ -70,8 +81,8 @@ beforeEach(() => {
       disk.set("note (副本).md", bytes);
       return { path: "note (副本).md", warning: null };
     }),
-    sessionSetCurrent: vi.fn(async () => {}),
-    sessionSetHistory: vi.fn(async () => {}),
+    sessionSetDocuments: vi.fn(async () => {}),
+    sessionSetSourceViews: vi.fn(async () => {}),
     sessionGetPanes: vi.fn(async () => ({ ...emptyReaderSession })),
     sessionSetPanes: vi.fn(async () => {}),
     linksResolve: vi.fn(async () => ({ status: "dead" as const })),
@@ -79,8 +90,10 @@ beforeEach(() => {
     indexLinksTo: vi.fn(async () => []),
     indexLinksFrom: vi.fn(async () => []),
     indexMentionsTo: vi.fn(async () => ({ linked: [], unlinked: [] })),
+    mentionsLinkify: vi.fn(async () => ({ warning: null })),
     searchQuery: vi.fn(async () => []),
     indexHeadings: vi.fn(async () => []),
+    indexTags: vi.fn(async () => []),
     entryRename: vi.fn(async () => ({ warning: null })),
     subscribeVaultChanged: (callback) => {
       onChanged = (event = { status: "changed", paths: [], healthy: true }) => callback(event);
@@ -171,13 +184,15 @@ function renameTo(name: string): void {
 }
 
 function selectAttachment(): void {
-  const formatting = target.querySelector("#editor-formatting");
+  const formatting = target.querySelector("[id^='editor-formatting']");
   if (!(formatting instanceof HTMLElement)) throw new Error("缺少格式面板");
   formatting.hidePopover = () => {};
   onCommand("insert-attachment");
   const input = target.querySelector('input[type="file"]');
   if (!(input instanceof HTMLInputElement)) throw new Error("缺少附件输入");
-  const file = Object.assign(new File(["data"], "x.zip"), { arrayBuffer: async () => encode("data").buffer });
+  const file = Object.assign(new File(["data"], "x.zip"), {
+    arrayBuffer: async () => encode("data").buffer,
+  });
   Object.defineProperty(input, "files", { value: [file] });
   input.dispatchEvent(new Event("change", { bubbles: true }));
   // jsdom 不提供 Range 布局，避免触发滚动测量；真实焦点与滚动由 Electron 旅程检查。
@@ -220,13 +235,19 @@ describe("保存、冲突与恢复的完整界面流程", () => {
     vi.mocked(api.attachmentImport).mockRejectedValueOnce(new Error("暂不可写"));
     await start();
     selectAttachment();
-    await vi.waitFor(() => expect(target.querySelector('.attachment-progress [role="alert"]')?.textContent).toContain("暂不可写"));
+    await vi.waitFor(() =>
+      expect(target.querySelector('.attachment-progress [role="alert"]')?.textContent).toContain(
+        "暂不可写",
+      ),
+    );
     disk.set("note.md", encode("external\n"));
     onChanged();
     await vi.waitFor(() => expect(api.fileSnapshot).toHaveBeenCalledTimes(2));
     expect(target.querySelector(".attachment-progress")).not.toBeNull();
     expect(target.querySelector(".ProseMirror")?.textContent).toBe("base");
-    const close = Array.from(target.querySelectorAll<HTMLButtonElement>(".attachment-progress button")).find((button) => button.textContent === "关闭");
+    const close = Array.from(
+      target.querySelectorAll<HTMLButtonElement>(".attachment-progress button"),
+    ).find((button) => button.textContent === "关闭");
     if (close === undefined) throw new Error("附件失败缺少关闭入口");
     close.click();
     await vi.waitFor(() => {
@@ -246,7 +267,9 @@ describe("保存、冲突与恢复的完整界面流程", () => {
     expect(appApi.closeAfterFlush).not.toHaveBeenCalled();
     imported.resolve({ path: "attachments/x.zip", warning: null });
     await vi.waitFor(() => expect(appApi.closeAfterFlush).toHaveBeenCalledOnce());
-    expect(decode(disk.get("note.md") ?? new Uint8Array())).toContain("[x.zip](./attachments/x.zip)");
+    expect(decode(disk.get("note.md") ?? new Uint8Array())).toContain(
+      "[x.zip](./attachments/x.zip)",
+    );
   });
 
   it("切换文件也等待整批附件，引用保存在原笔记中", async () => {
@@ -271,7 +294,11 @@ describe("保存、冲突与恢复的完整界面流程", () => {
     vi.mocked(api.attachmentImport).mockRejectedValueOnce(new Error("磁盘已满"));
     await start();
     selectAttachment();
-    await vi.waitFor(() => expect(target.querySelector('.attachment-progress [role="alert"]')?.textContent).toContain("磁盘已满"));
+    await vi.waitFor(() =>
+      expect(target.querySelector('.attachment-progress [role="alert"]')?.textContent).toContain(
+        "磁盘已满",
+      ),
+    );
     onClose();
     await vi.waitFor(() => expect(appApi.closeBlocked).toHaveBeenCalledOnce());
     expect(appApi.closeAfterFlush).not.toHaveBeenCalled();
@@ -287,7 +314,10 @@ describe("保存、冲突与恢复的完整界面流程", () => {
   it("冲突另存副本也等待附件，复制包含最终引用且不再向旧文件提交", async () => {
     await start();
     await edit("working");
-    vi.mocked(api.fileWrite).mockResolvedValueOnce({ status: "conflict", disk: encode("external") });
+    vi.mocked(api.fileWrite).mockResolvedValueOnce({
+      status: "conflict",
+      disk: encode("external"),
+    });
     onCommand("save");
     await vi.waitFor(() => expect(target.querySelector(".save-notice")).not.toBeNull());
     const imported = deferred<{ path: string; warning: string | null }>();
@@ -362,7 +392,11 @@ describe("保存、冲突与恢复的完整界面流程", () => {
       expect(target.querySelector('[data-path="note.md"]')).toBeNull();
     });
     expect(api.entryTrash).toHaveBeenCalledOnce();
-    expect(api.sessionSetCurrent).toHaveBeenLastCalledWith(null);
+    expect(api.sessionSetDocuments).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        panes: [expect.objectContaining({ currentPath: null })],
+      }),
+    );
     expect(disk.has("other.md")).toBe(true);
   });
 
@@ -441,7 +475,7 @@ describe("保存、冲突与恢复的完整界面流程", () => {
         "创建失败：父文件夹不存在",
       );
     });
-    expect(api.entryCreate).toHaveBeenCalledExactlyOnceWith("失踪/未命名.md", "file");
+    expect(api.entryCreate).toHaveBeenCalledExactlyOnceWith("失踪/未命名.md", "file", undefined);
     expect(target.querySelector<HTMLDialogElement>(".entry-dialog")?.open).toBe(true);
   });
 
@@ -590,7 +624,11 @@ describe("保存、冲突与恢复的完整界面流程", () => {
       expect(target.querySelector(".file.active")?.textContent?.trim()).toBe("renamed.md");
       expect(target.textContent).toContain("操作已完成。链接索引更新失败");
     });
-    expect(api.sessionSetCurrent).toHaveBeenLastCalledWith("renamed.md");
+    expect(api.sessionSetDocuments).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        panes: [expect.objectContaining({ currentPath: "renamed.md" })],
+      }),
+    );
     expect(api.indexMentionsTo).toHaveBeenLastCalledWith("renamed.md");
     expect(status()).toBe("已保存");
   });
@@ -633,7 +671,11 @@ describe("保存、冲突与恢复的完整界面流程", () => {
       flushSync();
       expect(target.querySelector(".ProseMirror")?.textContent).toBe("base");
     });
-    expect(api.sessionSetCurrent).toHaveBeenLastCalledWith("renamed.md");
+    expect(api.sessionSetDocuments).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        panes: [expect.objectContaining({ currentPath: "renamed.md" })],
+      }),
+    );
   });
 
   it("外部恢复成最初内容时，编辑器也必须重载，不能只更新保存基准", async () => {
@@ -770,8 +812,12 @@ describe("保存、冲突与恢复的完整界面流程", () => {
     expect(appApi.closeBlocked).not.toHaveBeenCalled();
     restored.resolve({
       root: "/notes",
-      currentPath: "note.md",
-      history: { back: [], forward: [] },
+      documents: {
+        panes: [{ currentPath: "note.md", history: { back: [], forward: [] } }],
+        active: 0,
+        split: false,
+      },
+      sourceViews: [],
     });
     await started;
     await vi.waitFor(() => expect(appApi.closeAfterFlush).toHaveBeenCalledTimes(1));
@@ -832,13 +878,11 @@ describe("保存、冲突与恢复的完整界面流程", () => {
     });
     click("保存");
     await vi.waitFor(() => expect(status()).toBe("存在保存冲突"));
-    vi.mocked(api.sessionSetCurrent).mockRejectedValueOnce(new Error("会话不可写"));
+    vi.mocked(api.sessionSetDocuments).mockRejectedValueOnce(new Error("会话不可写"));
     click("另存为副本");
     await vi.waitFor(() => {
       flushSync();
-      expect(target.textContent).toContain(
-        "副本已保存为 note (副本).md，但工作区状态未能更新",
-      );
+      expect(target.textContent).toContain("副本已保存为 note (副本).md，但工作区状态未能更新");
     });
     expect(target.querySelector(".message details")?.textContent).toContain("会话不可写");
     expect(target.querySelector(".feedback-announcement")?.textContent).not.toContain("会话不可写");
@@ -847,9 +891,7 @@ describe("保存、冲突与恢复的完整界面流程", () => {
     expect(status()).toBe("已保存");
     expect(decode(disk.get("note.md")!)).toBe("base\n");
     expect(decode(disk.get("note (副本).md")!)).toBe("copied edits\n");
-    expect(target.querySelector(".feedback-announcement")?.getAttribute("role")).toBe(
-      "alert",
-    );
+    expect(target.querySelector(".feedback-announcement")?.getAttribute("role")).toBe("alert");
     await edit("continued after warning");
     expect(target.querySelector(".message")?.textContent).toContain("会话不可写");
     click("保存");
@@ -995,7 +1037,11 @@ describe("保存、冲突与恢复的完整界面流程", () => {
     pending.resolve({ path: "note (副本).md", warning: null });
     await vi.waitFor(() => expect(status()).toBe("未保存"));
     expect(target.querySelector(".ProseMirror")?.textContent).toBe("newer edits");
-    expect(api.sessionSetCurrent).toHaveBeenLastCalledWith("note (副本).md");
+    expect(api.sessionSetDocuments).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        panes: [expect.objectContaining({ currentPath: "note (副本).md" })],
+      }),
+    );
     click("保存");
     await vi.waitFor(() => expect(status()).toBe("已保存"));
     expect(api.fileWrite).toHaveBeenLastCalledWith(
@@ -1077,7 +1123,7 @@ describe("保存、冲突与恢复的完整界面流程", () => {
     onChanged();
     await vi.waitFor(() => expect(api.indexMentionsTo).toHaveBeenCalledTimes(2));
     const remembered = deferred<void>();
-    vi.mocked(api.sessionSetCurrent).mockReturnValueOnce(remembered.promise);
+    vi.mocked(api.sessionSetDocuments).mockReturnValueOnce(remembered.promise);
     click("other.md");
     await vi.waitFor(() => {
       flushSync();
@@ -1216,9 +1262,19 @@ describe("原生菜单与输入法", () => {
     pending.resolve({ path: "note (副本).md", warning: null });
     await edit("副本最终输入");
     expect(target.querySelector(".ProseMirror")).toBe(editor);
-    expect(api.sessionSetCurrent).not.toHaveBeenCalledWith("note (副本).md");
+    expect(api.sessionSetDocuments).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        panes: [expect.objectContaining({ currentPath: "note (副本).md" })],
+      }),
+    );
     window.dispatchEvent(new CompositionEvent("compositionend"));
-    await vi.waitFor(() => expect(api.sessionSetCurrent).toHaveBeenCalledWith("note (副本).md"));
+    await vi.waitFor(() =>
+      expect(api.sessionSetDocuments).toHaveBeenCalledWith(
+        expect.objectContaining({
+          panes: [expect.objectContaining({ currentPath: "note (副本).md" })],
+        }),
+      ),
+    );
     expect(target.querySelector(".ProseMirror")?.textContent).toBe("副本最终输入");
     expect(status()).toBe("未保存");
   });
@@ -1268,7 +1324,7 @@ describe("原生菜单与输入法", () => {
     expect(api.vaultOpen).not.toHaveBeenCalled();
     expect(target.querySelector("dialog[open]")).toBeNull();
     window.dispatchEvent(new CompositionEvent("compositionend"));
-    const formatting = target.querySelector<HTMLElement>("#editor-formatting");
+    const formatting = target.querySelector<HTMLElement>("[id^='editor-formatting']");
     if (formatting === null) throw new Error("格式面板未挂载");
     formatting.hidePopover = () => {};
     onCommand("find");
