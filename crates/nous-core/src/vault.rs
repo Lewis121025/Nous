@@ -10,11 +10,12 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::error::Error;
-use crate::index::{self, FileRow};
+use crate::index::{self, DerivedRows, FileRow, HeadingRecord};
 use crate::link::LinkRecord;
 use crate::mention::{self, MentionKind, MentionRecord, Mentions};
 use crate::pathutil::{path_to_slashes, resolve_in_root};
 use crate::scan;
+use crate::search::{SearchHit, SearchQuery};
 
 /// 已打开的笔记库。
 ///
@@ -99,12 +100,13 @@ impl Vault {
             .filter(|entry| entry.kind == crate::EntryKind::Directory)
             .map(|entry| entry.path)
             .collect();
-        self.store_inventory(files.clone())?;
-        let (indexed_files, indexed_links, stale_scan) = {
+        self.store_indexed_inventory(&files)?;
+        let (indexed_files, indexed_links, mut aliases, stale_scan) = {
             let conn = self.lock_conn()?;
             (
                 index::load_files(&conn)?,
                 index::load_links(&conn)?,
+                index::load_alias_keys(&conn)?,
                 index::scan_version(&conn)? != index::SCAN_VERSION,
             )
         };
@@ -140,51 +142,35 @@ impl Vault {
             }
         }
 
-        let inventory = Inventory::from_files(files.clone());
-        let mut file_rows = Vec::new();
-        let mut links = Vec::new();
-        for (rel, mtime) in files.iter().zip(mtimes) {
-            if !stale_scan {
-                if let Some(old) = by_path.get(rel) {
-                    if old.mtime == mtime {
-                        file_rows.push(old.clone());
-                        if let Some(existing) = links_by.get(rel) {
-                            links.extend(existing.iter().cloned());
-                        }
-                        continue;
-                    }
-                }
-            }
-            let abs = resolve_in_root(&self.root, rel)?;
-            let bytes = fs::read(&abs)?;
-            let hash = hex_sha256(&bytes);
-            if !stale_scan {
-                if let Some(old) = by_path.get(rel) {
-                    if old.content_hash == hash {
-                        let mut updated = old.clone();
-                        updated.mtime = mtime;
-                        file_rows.push(updated);
-                        if let Some(existing) = links_by.get(rel) {
-                            links.extend(existing.iter().cloned());
-                        }
-                        continue;
-                    }
-                }
-            }
-            let (row, outgoing) = index_bytes(rel, &bytes, mtime, &inventory);
-            file_rows.push(row);
-            links.extend(outgoing);
-        }
+        // 派生表按篇增量同步：只有已消失的路径需要显式删除。
+        let removals: Vec<String> = by_path
+            .keys()
+            .filter(|path| !disk_set.contains(path.as_str()))
+            .cloned()
+            .collect();
 
-        if set_changed {
-            for link in &mut links {
-                link.to_path =
-                    resolve_against(&inventory, &link.from_path, &link.to_raw, link.kind);
-            }
+        let RefreshRows {
+            files: file_rows,
+            mut links,
+            derived,
+        } = collect_refresh_rows(
+            &self.root,
+            &files,
+            &mtimes,
+            &by_path,
+            &links_by,
+            stale_scan,
+        )?;
+        let inventory = identity_inventory(&files, &file_rows, &mut aliases, &removals, &derived);
+        // 标题和别名变了也要重绑其它文件的链接，不能只在文件集合变化时重算。
+        for link in &mut links {
+            assign_target(link, &inventory);
         }
 
         let conn = self.lock_conn()?;
-        index::replace_all(&conn, &file_rows, &links)?;
+        index::replace_all(&conn, &file_rows, &links, &removals, &derived)?;
+        drop(conn);
+        self.store_built_inventory(inventory)?;
         self.store_directories(directories)?;
         Ok(true)
     }
@@ -223,7 +209,21 @@ impl Vault {
     }
 
     fn store_inventory(&self, files: Vec<String>) -> Result<(), Error> {
-        *self.lock_inventory()? = Some(Inventory::from_files(files));
+        self.store_built_inventory(Inventory::from_files(files))
+    }
+
+    /// 用当前索引里的标题和别名重建解析表，供未改文件的快速路径继续按身份解析。
+    fn store_indexed_inventory(&self, files: &[String]) -> Result<(), Error> {
+        let conn = self.lock_conn()?;
+        let rows = index::load_files(&conn)?;
+        let aliases = index::load_alias_keys(&conn)?;
+        drop(conn);
+        let extras = crate::identity::extras_from_files(&rows, &aliases);
+        self.store_built_inventory(Inventory::with_extra(files.to_vec(), &extras))
+    }
+
+    fn store_built_inventory(&self, inventory: Inventory) -> Result<(), Error> {
+        *self.lock_inventory()? = Some(inventory);
         Ok(())
     }
 
@@ -411,34 +411,105 @@ impl Vault {
         index::links_from(&conn, path)
     }
 
-    /// 把 `from` 文件中的链接原文解析为库内路径。
+    /// 把 `from` 文件中的链接原文解析为跳转目标：路径、锚点与歧义候选。
     ///
-    /// wiki 仅在文件名唯一时命中；Markdown 相对路径按源文件目录拼接。
+    /// wiki 按键精确匹配（完整路径、去 `.md` 路径、文件名、词干、文首标题、
+    /// frontmatter 别名），唯一才命中；多义时返回候选列表。
+    /// Markdown 相对路径按源文件目录拼接。
+    /// 纯锚点链接（`[[#标题]]`、`[](#标题)`）指向源文件自身。
     #[must_use]
     pub fn resolve_link(
         &self,
         from: &str,
         raw: &str,
         kind: crate::link::LinkKind,
-    ) -> Option<String> {
-        let guard = self.lock_inventory().ok()?;
-        let inventory = guard.as_ref()?;
-        resolve_against(inventory, from, raw, kind)
+    ) -> crate::link::LinkTarget {
+        use crate::link::LinkTarget;
+        let Ok(guard) = self.lock_inventory() else {
+            return LinkTarget::Dead;
+        };
+        let Some(inventory) = guard.as_ref() else {
+            return LinkTarget::Dead;
+        };
+        let (path, suffix) = crate::link::split_resource(raw.trim());
+        let anchor = crate::link::anchor_of(suffix, kind);
+        if path.is_empty() {
+            return match anchor {
+                Some(anchor) => LinkTarget::Resolved {
+                    path: from.to_string(),
+                    anchor: Some(anchor),
+                },
+                None => LinkTarget::Dead,
+            };
+        }
+        match kind {
+            crate::link::LinkKind::Wiki => match resolve_wiki(inventory, path) {
+                WikiHits::One(path) => LinkTarget::Resolved { path, anchor },
+                WikiHits::Many(candidates) => LinkTarget::Ambiguous { candidates, anchor },
+                WikiHits::None => LinkTarget::Dead,
+            },
+            crate::link::LinkKind::Markdown => match resolve_markdown(inventory, from, path) {
+                Some(path) => LinkTarget::Resolved { path, anchor },
+                None => LinkTarget::Dead,
+            },
+        }
     }
 
-    /// 用刚写入的字节更新该文件索引；文件集合变了才重算全库指向。
+    /// 一篇文件的全部标题，按文档顺序；供锚点解析与标题补全。
+    ///
+    /// # Errors
+    ///
+    /// 索引查询失败。
+    pub fn headings(&self, path: &str) -> Result<Vec<HeadingRecord>, Error> {
+        let conn = self.lock_conn()?;
+        index::load_headings(&conn, path)
+    }
+
+    /// 结构化全文搜索；条件语义见 [`SearchQuery`]。
+    ///
+    /// # Errors
+    ///
+    /// 索引查询失败。
+    pub fn search(&self, query: &SearchQuery) -> Result<Vec<SearchHit>, Error> {
+        let conn = self.lock_conn()?;
+        crate::search::execute(&conn, query)
+    }
+
+    /// 用刚写入的字节更新该文件索引。
     ///
     /// 必须扫盘：外部删文件不会走 `write`，缓存里还留着旧路径。
+    /// 标题或别名变了要重绑全库链接；只改正文时只更新这一篇的出链。
     pub(super) fn reindex_written(&self, rel: &str, bytes: &[u8]) -> Result<(), Error> {
+        let old_wiki = self
+            .lock_inventory()?
+            .as_ref()
+            .map(|inventory| inventory.wiki.clone());
         let files = self.scan_files()?;
-        self.store_inventory(files.clone())?;
-        let inventory = Inventory::from_files(files);
         let mtime = mtime_stamp(&fs::metadata(&resolve_in_root(&self.root, rel)?)?);
-        let (row, new_links) = index_bytes(rel, bytes, mtime, &inventory);
+        let (row, mut new_links, derived) = index_bytes(rel, bytes, mtime);
+        let (mut aliases, mut rows) = {
+            let conn = self.lock_conn()?;
+            (index::load_alias_keys(&conn)?, index::load_files(&conn)?)
+        };
+        let indexed_set: HashSet<String> = rows.iter().map(|item| item.path.clone()).collect();
+        aliases.insert(
+            rel.to_string(),
+            crate::identity::alias_keys(&derived.attributes),
+        );
+        if let Some(existing) = rows.iter_mut().find(|item| item.path == rel) {
+            existing.title.clone_from(&row.title);
+            existing.kind.clone_from(&row.kind);
+        } else {
+            rows.push(row.clone());
+        }
+        rows.retain(|item| files.iter().any(|path| path == &item.path));
+        let extras = crate::identity::extras_from_files(&rows, &aliases);
+        let inventory = Inventory::with_extra(files, &extras);
+        for link in &mut new_links {
+            assign_target(link, &inventory);
+        }
 
         let conn = self.lock_conn()?;
-        let file_rows = index::load_files(&conn)?;
-        let indexed_set: HashSet<String> = file_rows.iter().map(|file| file.path.clone()).collect();
         let set_changed = inventory.set != indexed_set;
         if set_changed {
             for old in &indexed_set {
@@ -447,15 +518,17 @@ impl Vault {
                 }
             }
         }
-        index::upsert_file(&conn, &row, &new_links)?;
-        if set_changed {
+        index::upsert_file(&conn, &row, &new_links, &derived)?;
+        // 身份键变化会改写其它文件里的标题/别名链接，不能只更新刚写入的这篇。
+        if old_wiki.as_ref() != Some(&inventory.wiki) {
             let mut links = index::load_links(&conn)?;
             for link in &mut links {
-                link.to_path =
-                    resolve_against(&inventory, &link.from_path, &link.to_raw, link.kind);
+                assign_target(link, &inventory);
             }
             index::replace_links(&conn, &links)?;
         }
+        drop(conn);
+        self.store_built_inventory(inventory)?;
         Ok(())
     }
 }
@@ -487,40 +560,67 @@ pub(super) struct Inventory {
 
 impl Inventory {
     pub(super) fn from_files(files: Vec<String>) -> Self {
-        let wiki = wiki_map(&files);
+        Self::with_extra(files, &HashMap::new())
+    }
+
+    /// `extra` 是每篇笔记的标题与别名；与路径键重复的项在并入时丢掉。
+    pub(super) fn with_extra(files: Vec<String>, extra: &HashMap<String, Vec<String>>) -> Self {
+        let wiki = wiki_map(&files, extra);
         let set = files.iter().cloned().collect();
         Self { files, set, wiki }
     }
 }
 
-fn wiki_map(files: &[String]) -> HashMap<String, Vec<String>> {
+fn wiki_map(files: &[String], extra: &HashMap<String, Vec<String>>) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for file in files {
         let path = Path::new(file);
-        let name = path
-            .file_name()
-            .map(|part| part.to_string_lossy().into_owned());
-        let stem = path
-            .file_stem()
-            .map(|part| part.to_string_lossy().into_owned());
-        if let Some(name) = name {
-            map.entry(name.clone()).or_default().push(file.clone());
-            if let Some(stem) = stem {
-                if stem != name {
-                    map.entry(stem).or_default().push(file.clone());
+        // 每个文件的键去重后各推一次：根级文件的完整路径与文件名重合，
+        // 重复推送会把唯一命中伪造成歧义。
+        let mut keys: Vec<String> = vec![file.clone()];
+        if is_markdown(file) {
+            if let Some(stem) = path.file_stem() {
+                if let Ok(stem_path) = path_to_slashes(&path.with_file_name(stem)) {
+                    if !keys.contains(&stem_path) {
+                        keys.push(stem_path);
+                    }
                 }
             }
+        }
+        if let Some(name) = path
+            .file_name()
+            .map(|part| part.to_string_lossy().into_owned())
+        {
+            if !keys.contains(&name) {
+                keys.push(name.clone());
+            }
+            if let Some(stem) = path
+                .file_stem()
+                .map(|part| part.to_string_lossy().into_owned())
+            {
+                if stem != name && !keys.contains(&stem) {
+                    keys.push(stem);
+                }
+            }
+        }
+        if let Some(extra_keys) = extra.get(file) {
+            for key in extra_keys {
+                if !keys.contains(key) {
+                    keys.push(key.clone());
+                }
+            }
+        }
+        for key in keys {
+            map.entry(key).or_default().push(file.clone());
         }
     }
     map
 }
 
-fn index_bytes(
-    rel: &str,
-    bytes: &[u8],
-    mtime: i64,
-    inventory: &Inventory,
-) -> (FileRow, Vec<LinkRecord>) {
+/// 从字节抽出文件行、出链和派生数据。
+///
+/// 出链先保持未解析。标题和别名要等整库身份表齐了才能绑定，调用方负责 `assign_target`。
+fn index_bytes(rel: &str, bytes: &[u8], mtime: i64) -> (FileRow, Vec<LinkRecord>, DerivedRows) {
     if !is_markdown(rel) {
         return (
             FileRow {
@@ -531,23 +631,60 @@ fn index_bytes(
                 content_hash: hex_sha256(bytes),
             },
             Vec::new(),
+            empty_derived(),
         );
     }
-    let (heading, mut links) = std::str::from_utf8(bytes).map_or_else(
-        |_| (None, Vec::new()),
-        |text| scan::scan_markdown(rel, text),
-    );
-    for link in &mut links {
-        link.to_path = resolve_against(inventory, &link.from_path, &link.to_raw, link.kind);
-    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        // 不可解码的 Markdown：无链接、无派生数据，标题按文件名回退。
+        return (
+            FileRow {
+                path: rel.to_string(),
+                title: file_title_fallback(rel),
+                kind: "markdown".to_string(),
+                mtime,
+                content_hash: hex_sha256(bytes),
+            },
+            Vec::new(),
+            empty_derived(),
+        );
+    };
+    let scanned = scan::scan_markdown(rel, text);
+    let links = scanned.links;
+    let title = scanned.title.unwrap_or_else(|| file_title_fallback(rel));
     let row = FileRow {
         path: rel.to_string(),
-        title: heading.unwrap_or_else(|| file_title_fallback(rel)),
+        title: title.clone(),
         kind: "markdown".to_string(),
         mtime,
         content_hash: hex_sha256(bytes),
     };
-    (row, links)
+    let derived = DerivedRows {
+        headings: scanned
+            .headings
+            .into_iter()
+            .map(|heading| HeadingRecord {
+                path: rel.to_string(),
+                level: heading.level,
+                text: heading.text,
+                start_byte: heading.start_byte,
+                end_byte: heading.end_byte,
+            })
+            .collect(),
+        tags: scanned.tags,
+        attributes: scanned.attributes,
+        text: Some((title, scanned.body_text)),
+    };
+    (row, links, derived)
+}
+
+/// 无派生数据的空行集合。
+fn empty_derived() -> DerivedRows {
+    DerivedRows {
+        headings: Vec::new(),
+        tags: Vec::new(),
+        attributes: Vec::new(),
+        text: None,
+    }
 }
 
 fn mtime_stamp(meta: &fs::Metadata) -> i64 {
@@ -559,7 +696,7 @@ fn mtime_stamp(meta: &fs::Metadata) -> i64 {
         })
 }
 
-fn is_markdown(rel: &str) -> bool {
+pub(super) fn is_markdown(rel: &str) -> bool {
     Path::new(rel)
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
@@ -580,6 +717,123 @@ fn hex_sha256(bytes: &[u8]) -> String {
     })
 }
 
+/// 一次刷新收集到的文件行、出链和需要重写的派生数据。
+struct RefreshRows {
+    files: Vec<FileRow>,
+    links: Vec<LinkRecord>,
+    derived: Vec<(String, crate::index::DerivedRows)>,
+}
+
+/// 未改文件沿用索引行；内容变了才重读并抽出派生数据。
+fn collect_refresh_rows(
+    root: &Path,
+    files: &[String],
+    mtimes: &[i64],
+    by_path: &HashMap<String, FileRow>,
+    links_by: &HashMap<String, Vec<LinkRecord>>,
+    stale_scan: bool,
+) -> Result<RefreshRows, Error> {
+    let mut file_rows = Vec::new();
+    let mut links = Vec::new();
+    let mut derived = Vec::new();
+    for (rel, mtime) in files.iter().zip(mtimes) {
+        if !stale_scan {
+            if let Some(old) = by_path.get(rel) {
+                if old.mtime == *mtime {
+                    file_rows.push(old.clone());
+                    if let Some(existing) = links_by.get(rel) {
+                        links.extend(existing.iter().cloned());
+                    }
+                    continue;
+                }
+            }
+        }
+        let bytes = fs::read(resolve_in_root(root, rel)?)?;
+        let hash = hex_sha256(&bytes);
+        if !stale_scan {
+            if let Some(old) = by_path.get(rel) {
+                if old.content_hash == hash {
+                    let mut updated = old.clone();
+                    updated.mtime = *mtime;
+                    file_rows.push(updated);
+                    if let Some(existing) = links_by.get(rel) {
+                        links.extend(existing.iter().cloned());
+                    }
+                    continue;
+                }
+            }
+        }
+        let (row, outgoing, rows) = index_bytes(rel, &bytes, *mtime);
+        file_rows.push(row);
+        links.extend(outgoing);
+        derived.push((rel.clone(), rows));
+    }
+    Ok(RefreshRows {
+        files: file_rows,
+        links,
+        derived,
+    })
+}
+
+/// 用本次扫描覆盖别名后，按标题和别名建成解析表。
+fn identity_inventory(
+    files: &[String],
+    file_rows: &[crate::index::FileRow],
+    aliases: &mut std::collections::HashMap<String, Vec<String>>,
+    removals: &[String],
+    derived: &[(String, crate::index::DerivedRows)],
+) -> Inventory {
+    for path in removals {
+        aliases.remove(path);
+    }
+    for (path, rows) in derived {
+        aliases.insert(path.clone(), crate::identity::alias_keys(&rows.attributes));
+    }
+    let extras = crate::identity::extras_from_files(file_rows, aliases);
+    Inventory::with_extra(files.to_vec(), &extras)
+}
+
+/// 把一条索引链接写成唯一路径或未解析状态。
+///
+/// 纯锚点记为 [`crate::link::LinkResolution::SelfAnchor`]，不产生图边。
+pub(super) fn assign_target(link: &mut crate::link::LinkRecord, inventory: &Inventory) {
+    let (to_path, resolution) = indexed_target(inventory, &link.from_path, &link.to_raw, link.kind);
+    link.to_path = to_path;
+    link.resolution = resolution;
+}
+
+fn indexed_target(
+    inventory: &Inventory,
+    from: &str,
+    raw: &str,
+    kind: crate::link::LinkKind,
+) -> (Option<String>, crate::link::LinkResolution) {
+    use crate::link::LinkResolution;
+    let (path, suffix) = crate::link::split_resource(raw.trim());
+    if path.is_empty() {
+        let anchor = crate::link::anchor_of(suffix, kind);
+        return (
+            None,
+            if anchor.is_some() {
+                LinkResolution::SelfAnchor
+            } else {
+                LinkResolution::Dead
+            },
+        );
+    }
+    match kind {
+        crate::link::LinkKind::Wiki => match resolve_wiki(inventory, path) {
+            WikiHits::One(hit) => (Some(hit), LinkResolution::Resolved),
+            WikiHits::Many(_) => (None, LinkResolution::Ambiguous),
+            WikiHits::None => (None, LinkResolution::Dead),
+        },
+        crate::link::LinkKind::Markdown => match resolve_markdown(inventory, from, path) {
+            Some(hit) => (Some(hit), LinkResolution::Resolved),
+            None => (None, LinkResolution::Dead),
+        },
+    }
+}
+
 pub(super) fn resolve_against(
     inventory: &Inventory,
     from: &str,
@@ -587,18 +841,43 @@ pub(super) fn resolve_against(
     kind: crate::link::LinkKind,
 ) -> Option<String> {
     let (path, _) = crate::link::split_resource(raw.trim());
+    // 纯锚点链接指向源文件自身，不构成图边，索引里保持死链语义。
+    if path.is_empty() {
+        return None;
+    }
     match kind {
-        crate::link::LinkKind::Wiki => resolve_wiki(inventory, path),
+        crate::link::LinkKind::Wiki => match resolve_wiki(inventory, path) {
+            WikiHits::One(hit) => Some(hit),
+            WikiHits::None | WikiHits::Many(_) => None,
+        },
         crate::link::LinkKind::Markdown => resolve_markdown(inventory, from, path),
     }
 }
 
-fn resolve_wiki(inventory: &Inventory, raw: &str) -> Option<String> {
-    let hits = inventory.wiki.get(raw)?;
-    if hits.len() == 1 {
-        hits.first().cloned()
-    } else {
-        None
+/// wiki 目标的解析候选。
+enum WikiHits {
+    /// 无任何键命中。
+    None,
+    /// 唯一命中。
+    One(String),
+    /// 名称歧义；候选按路径升序。
+    Many(Vec<String>),
+}
+
+/// 解析 wiki 目标：按键精确匹配（键集合 = 完整路径、去 `.md` 路径、
+/// 文件名、词干），多义时返回全部候选而不是静默取一。
+///
+/// 不做「补 `.md` 再试」的回落：裸名同时命中 `C.md` 与 `C.txt` 的词干时
+/// 就是真歧义，回落会把歧义伪装成唯一命中。
+fn resolve_wiki(inventory: &Inventory, raw: &str) -> WikiHits {
+    match inventory.wiki.get(raw).map(Vec::as_slice) {
+        Some([hit]) => WikiHits::One(hit.clone()),
+        Some(hits) => {
+            let mut candidates = hits.to_vec();
+            candidates.sort();
+            WikiHits::Many(candidates)
+        }
+        None => WikiHits::None,
     }
 }
 

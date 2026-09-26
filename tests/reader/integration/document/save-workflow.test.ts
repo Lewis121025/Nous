@@ -9,6 +9,7 @@ import type {
   Mentions,
   ReaderApi,
   SavedCopy,
+  VaultRestore,
   WriteResult,
   VaultEvent,
 } from "@reader/shared/api";
@@ -47,7 +48,7 @@ beforeEach(() => {
     ["other.md", encode("other\n")],
   ]);
   api = {
-    vaultRestore: vi.fn(async () => ({ root: "/notes", currentPath: "note.md" })),
+    vaultRestore: vi.fn(async () => ({ root: "/notes", currentPath: "note.md", history: { back: [], forward: [] } })),
     vaultOpen: vi.fn(async () => null),
     vaultClose: vi.fn(async () => {}),
     vaultList: vi.fn(async () => [...disk.keys()]),
@@ -70,13 +71,16 @@ beforeEach(() => {
       return { path: "note (副本).md", warning: null };
     }),
     sessionSetCurrent: vi.fn(async () => {}),
+    sessionSetHistory: vi.fn(async () => {}),
     sessionGetPanes: vi.fn(async () => ({ ...emptyReaderSession })),
     sessionSetPanes: vi.fn(async () => {}),
-    linksResolve: vi.fn(async () => null),
+    linksResolve: vi.fn(async () => ({ status: "dead" as const })),
     openExternal: vi.fn(async () => {}),
     indexLinksTo: vi.fn(async () => []),
     indexLinksFrom: vi.fn(async () => []),
     indexMentionsTo: vi.fn(async () => ({ linked: [], unlinked: [] })),
+    searchQuery: vi.fn(async () => []),
+    indexHeadings: vi.fn(async () => []),
     entryRename: vi.fn(async () => ({ warning: null })),
     subscribeVaultChanged: (callback) => {
       onChanged = (event = { status: "changed", paths: [], healthy: true }) => callback(event);
@@ -756,7 +760,7 @@ describe("保存、冲突与恢复的完整界面流程", () => {
   });
 
   it("启动恢复尚未完成时记住关闭请求，完成后自动关闭", async () => {
-    const restored = deferred<{ root: string; currentPath: string | null }>();
+    const restored = deferred<VaultRestore>();
     vi.mocked(api.vaultRestore).mockReturnValueOnce(restored.promise);
     const started = start();
     await vi.waitFor(() => expect(api.vaultRestore).toHaveBeenCalledTimes(1));
@@ -764,7 +768,11 @@ describe("保存、冲突与恢复的完整界面流程", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(appApi.closeAfterFlush).not.toHaveBeenCalled();
     expect(appApi.closeBlocked).not.toHaveBeenCalled();
-    restored.resolve({ root: "/notes", currentPath: "note.md" });
+    restored.resolve({
+      root: "/notes",
+      currentPath: "note.md",
+      history: { back: [], forward: [] },
+    });
     await started;
     await vi.waitFor(() => expect(appApi.closeAfterFlush).toHaveBeenCalledTimes(1));
   });

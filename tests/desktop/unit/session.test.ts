@@ -36,7 +36,13 @@ describe("应用与阅读器会话", () => {
     ).toEqual({
       appearance: "dark",
       window,
-      reader: { vaultRoot: "/notes", currentPath: "a.md", leftWidth: 230, filesCollapsed: true },
+      reader: {
+        vaultRoot: "/notes",
+        currentPath: "a.md",
+        leftWidth: 230,
+        filesCollapsed: true,
+        history: { back: [], forward: [] },
+      },
     });
   });
   it("新命名空间优先，旧平铺字段不能覆盖阅读器状态", () => {

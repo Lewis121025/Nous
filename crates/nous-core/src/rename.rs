@@ -3,7 +3,7 @@
 mod source;
 
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -102,12 +102,20 @@ impl Vault {
         let source = MoveSource::scan(self.root(), from)?;
         let directories = source.directories(self.root(), to)?;
         let files = self.scan_files()?;
-        let before = Inventory::from_files(files.clone());
-        let after = Inventory::from_files(
+        // 身份和改写必须用同一次读取，避免两次读盘之间正文变了，歧义判断和写入各看各的。
+        let snapshot = self.read_markdown_snapshot(&files)?;
+        let before = Inventory::with_extra(files.clone(), &snapshot.extras);
+        let after_extras: HashMap<String, Vec<String>> = snapshot
+            .extras
+            .iter()
+            .map(|(path, keys)| (moved_path(path, from, to), keys.clone()))
+            .collect();
+        let after = Inventory::with_extra(
             files
                 .iter()
                 .map(|path| moved_path(path, from, to))
                 .collect(),
+            &after_extras,
         );
         let mut creates = Vec::new();
         let mut updates = Vec::new();
@@ -122,7 +130,11 @@ impl Vault {
             if !moving && !path.to_lowercase().ends_with(".md") {
                 continue;
             }
-            let bytes = self.read(path)?;
+            let bytes = snapshot
+                .bytes
+                .get(path)
+                .cloned()
+                .map_or_else(|| self.read(path), Ok)?;
             let rewritten = if path.to_lowercase().ends_with(".md") {
                 rewrite_file(path, &bytes, from, to, &before, &after)?
             } else {
@@ -178,6 +190,28 @@ impl Vault {
         })
     }
 
+    /// 一次读完 Markdown，同时给出身份键和即将改写的字节。
+    ///
+    /// 读失败直接返回，不再吞掉错误后用另一份内容继续改名。
+    fn read_markdown_snapshot(&self, files: &[String]) -> Result<MarkdownSnapshot, Error> {
+        let mut bytes = HashMap::new();
+        let mut extras = HashMap::new();
+        for path in files {
+            if !crate::vault::is_markdown(path) {
+                continue;
+            }
+            let read = self.read(path)?;
+            if let Ok(text) = std::str::from_utf8(&read) {
+                let keys = crate::identity::keys_from_scan(&crate::scan::scan_markdown(path, text));
+                if !keys.is_empty() {
+                    extras.insert(path.clone(), keys);
+                }
+            }
+            bytes.insert(path.clone(), read);
+        }
+        Ok(MarkdownSnapshot { extras, bytes })
+    }
+
     fn apply_rename(&self, journal: &RenameJournal) -> Result<(), Error> {
         for directory in &journal.directories {
             create_move_directory(self.root(), &self.recovery, journal, directory)?;
@@ -202,6 +236,12 @@ impl Vault {
         }
         self.recovery.commit_rename()
     }
+}
+
+/// 改名计划用的 Markdown 快照：身份键和正文来自同一次读取。
+struct MarkdownSnapshot {
+    extras: HashMap<String, Vec<String>>,
+    bytes: HashMap<String, Vec<u8>>,
 }
 
 fn create_move_directory(
@@ -250,7 +290,7 @@ fn rewrite_file(
     let Ok(source) = std::str::from_utf8(bytes) else {
         return Ok(bytes.to_vec());
     };
-    let (_, links) = crate::scan::scan_markdown(path, source);
+    let links = crate::scan::scan_markdown(path, source).links;
     let mut edits = Vec::new();
     for link in links.iter().rev() {
         let Some(target) = resolve_against(before, path, &link.to_raw, link.kind) else {
@@ -263,15 +303,21 @@ fn rewrite_file(
         }
         let target_text = match link.kind {
             LinkKind::Wiki => {
-                let stem = crate::rewrite::wiki_target_name(&new_target);
-                if resolve_against(after, &new_source, &stem, LinkKind::Wiki).as_deref()
-                    != Some(new_target.as_str())
-                {
-                    return Err(Error::Io(io::Error::other(
-                        "目标名称会使现有 wiki 链接产生歧义，请换一个名称",
-                    )));
+                let (original_target, _) = crate::link::split_resource(link.to_raw.trim());
+                if original_target.contains('/') {
+                    // 路径形式保持路径形式：无歧义，不参与名称唯一性检查。
+                    crate::rewrite::wiki_target_path(original_target, &new_target)
+                } else {
+                    let stem = crate::rewrite::wiki_target_name(&new_target);
+                    if resolve_against(after, &new_source, &stem, LinkKind::Wiki).as_deref()
+                        != Some(new_target.as_str())
+                    {
+                        return Err(Error::Io(io::Error::other(
+                            "目标名称会使现有 wiki 链接产生歧义，请换一个名称",
+                        )));
+                    }
+                    stem
                 }
-                stem
             }
             LinkKind::Markdown => crate::rewrite::relative_markdown_url(&new_source, &new_target)?,
         };

@@ -1,21 +1,25 @@
 <script lang="ts">
   import BacklinksPane from "../navigation/BacklinksPane.svelte";
+  import OutlinksPane from "../navigation/OutlinksPane.svelte";
   import CodeEditor from "../editors/CodeEditor.svelte";
   import DocumentEditor from "../editors/DocumentEditor.svelte";
   import ImagePreview from "../previews/ImagePreview.svelte";
   import PdfPreview from "../previews/PdfPreview.svelte";
   import type { MediaIo } from "../../engine/media/media";
+  import { markdownLinkCompletion } from "../../engine/editing/link-suggest/codemirror";
   import type { ReaderWorkspaceController } from "../../state/workspace.svelte";
 
   let { workspace, mediaIo }: { workspace: ReaderWorkspaceController; mediaIo: MediaIo } = $props();
   const doc = $derived(workspace.document);
   const navigation = $derived(workspace.navigation);
+  // 源码视图的 [[ 补全；文件列表在每次触发时实时读取。
+  const sourceCompletions = markdownLinkCompletion(() => workspace.files);
 </script>
 
 {#if doc.path !== null}
   {#key workspace.vaultRoot}
     {#key doc.path}
-      {#if doc.content?.kind === "markdown"}
+      {#if doc.content?.kind === "markdown" && workspace.viewMode === "wysiwyg"}
         <DocumentEditor
           linkTargets={workspace.files.filter((path) => path.toLowerCase().endsWith(".md"))}
           {mediaIo}
@@ -30,14 +34,16 @@
           onOpenLink={workspace.openLink}
           onOutline={navigation.setOutline}
           register={navigation.registerMarkdown}
+          suggestHeadings={workspace.suggestHeadings}
         />
-      {:else if doc.content?.kind === "text"}
+      {:else if doc.content?.kind === "markdown" || doc.content?.kind === "text"}
         <CodeEditor
           source={doc.content.source}
           path={doc.path}
           onDirty={workspace.markDirty}
           onSave={workspace.requestSave}
           register={navigation.registerCode}
+          {...doc.content.kind === "markdown" ? { completions: sourceCompletions } : {}}
         />
       {:else if doc.content?.kind === "image"}
         <ImagePreview path={doc.path} bytes={doc.content.bytes} />
@@ -54,6 +60,10 @@
   {/key}
 
   {#key doc.epoch}
+    <OutlinksPane
+      links={navigation.outlinks}
+      onOpen={(link) => void workspace.openLink(link.kind, link.toRaw)}
+    />
     <BacklinksPane
       mentions={navigation.mentions}
       onOpen={(mention) => void navigation.openMention(mention, workspace.openFile)}

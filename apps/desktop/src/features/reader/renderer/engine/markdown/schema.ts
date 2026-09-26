@@ -188,6 +188,36 @@ const nodes: Record<string, NodeSpec> = {
       String(node.attrs["alt"] || node.attrs["src"]),
     ],
   },
+  note_embed: {
+    atom: true,
+    group: "block",
+    attrs: {
+      target: { default: "", validate: "string" },
+      alias: { default: null, validate: "string|null" },
+      anchor: { default: null, validate: "string|null" },
+    },
+    parseDOM: [
+      {
+        tag: "div[data-note-embed]",
+        getAttrs: (dom) => ({
+          target: dom.getAttribute("data-note-target") ?? "",
+          alias: dom.getAttribute("data-note-alias"),
+          anchor: dom.getAttribute("data-note-anchor"),
+        }),
+      },
+    ],
+    toDOM: (node) => [
+      "div",
+      {
+        "data-note-embed": "",
+        "data-note-target": node.attrs["target"] as string,
+        "data-note-alias": node.attrs["alias"] as string | null,
+        "data-note-anchor": node.attrs["anchor"] as string | null,
+        class: "note-embed",
+      },
+      embedLabel(node),
+    ],
+  },
   wiki_link: {
     inline: true,
     atom: true,
@@ -448,6 +478,15 @@ function linkKind(value: unknown): void {
 function tableAlign(value: unknown): void {
   if (value !== null && value !== "left" && value !== "right" && value !== "center")
     throw new RangeError("未知表格对齐方式");
+}
+
+/** 嵌入降级文本：没有 NodeView 时仍能看出目标。 */
+function embedLabel(node: { attrs: Record<string, unknown> }): string {
+  const alias = node.attrs["alias"];
+  const target = String(node.attrs["target"] ?? "");
+  const anchor = node.attrs["anchor"];
+  const name = typeof alias === "string" && alias !== "" ? alias : target;
+  return typeof anchor === "string" && anchor !== "" ? `${name}#${anchor}` : name;
 }
 
 /** 文档表面使用的 schema。 */

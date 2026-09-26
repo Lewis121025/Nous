@@ -1,15 +1,23 @@
 import type {
   HistoryAction,
   HistoryAvailability,
+  LinkRecord,
   MentionRecord,
   Mentions,
   ReaderApi,
 } from "../../shared/api";
 import type { CodeEditorApi, MarkdownEditorApi } from "../engine/editing/editor-api";
 import { mentionOccurrenceIndex } from "../engine/navigation/backlinks";
+import { normalizeHeadingText } from "../engine/navigation/heading-anchor";
 import { buildOutlineTree, outlineEquals, type OutlineItem } from "../engine/navigation/outline";
 import type { ReaderDocument } from "./document.svelte";
 import type { EditorSnapshot } from "../engine/markdown/source-session";
+
+/** 等待编辑器挂载后兑现的定位；提及按记录定位，搜索命中按词定位，锚点按标题定位。 */
+type PendingJump =
+  | { kind: "mention"; mention: MentionRecord; all: MentionRecord[] }
+  | { kind: "text"; path: string; needle: string }
+  | { kind: "heading"; path: string; anchor: string; onMissing: () => void };
 
 /** 阅读上下文：目录折叠、引用查询及等待编辑器挂载后的定位，不参与文件写入。 */
 export class ReaderNavigation {
@@ -17,8 +25,9 @@ export class ReaderNavigation {
   private tree = $derived(buildOutlineTree(this.headings));
   private collapsed = $state<Record<string, string[]>>({});
   private references = $state<Mentions>({ linked: [], unlinked: [] });
+  private outgoing = $state<LinkRecord[]>([]);
   private mentionGeneration = 0;
-  private pending: { mention: MentionRecord; all: MentionRecord[] } | null = null;
+  private pending: PendingJump | null = null;
   private markdown = $state.raw<MarkdownEditorApi | null>(null);
   private code = $state.raw<CodeEditorApi | null>(null);
 
@@ -61,11 +70,16 @@ export class ReaderNavigation {
   get mentions() {
     return this.references;
   }
+  /** 当前文档的索引出链，按文档顺序。 */
+  get outlinks() {
+    return this.outgoing;
+  }
 
   /** 清除上一文档的引用并使其查询失效，等待中的跨文件定位仍保留。 */
   resetReferences(): void {
     this.mentionGeneration += 1;
     this.references = { linked: [], unlinked: [] };
+    this.outgoing = [];
   }
 
   /** 清空工作区时同时丢弃目录与等待定位，不保留上一文档的界面状态。 */
@@ -76,11 +90,18 @@ export class ReaderNavigation {
   }
 
   /**
-   * 查询当前文档引用；切换文档或后续查询开始后丢弃旧结果。
+   * 查询当前文档的提及与出链；一次代次推进同时作废两类旧响应，
+   * 切换文档或后续刷新开始后丢弃过期结果。
+   *
+   * 两类查询必须在同一入口推进代次：分开调用会引入「谁先执行」的
+   * 隐式时序耦合，晚推进的一方会误作废另一方的在途响应。
+   *
    * @param api 阅读器索引查询能力。
-   * @returns 当前查询的错误文本或 null，旧查询的错误同样丢弃。
+   * @returns 当前查询的错误文本或 null；旧查询的错误同样丢弃。
    */
-  async refreshMentions(api: Pick<ReaderApi, "indexMentionsTo">): Promise<string | null> {
+  async refreshReferences(
+    api: Pick<ReaderApi, "indexMentionsTo" | "indexLinksFrom">,
+  ): Promise<string | null> {
     const { epoch, path } = this.document;
     const generation = ++this.mentionGeneration;
     if (path === null) return null;
@@ -88,15 +109,24 @@ export class ReaderNavigation {
       generation === this.mentionGeneration &&
       epoch === this.document.epoch &&
       path === this.document.path;
-    try {
-      const mentions = await api.indexMentionsTo(path);
-      if (isCurrent()) this.references = mentions;
-      return null;
-    } catch (error) {
-      return isCurrent()
-        ? `引用暂不可用：${error instanceof Error ? error.message : String(error)}`
-        : null;
+    const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+    // allSettled：一类查询失败不能吞掉另一类的有效结果。
+    const [mentions, outlinks] = await Promise.allSettled([
+      api.indexMentionsTo(path),
+      api.indexLinksFrom(path),
+    ]);
+    let error: string | null = null;
+    if (mentions.status === "fulfilled") {
+      if (isCurrent()) this.references = mentions.value;
+    } else if (isCurrent()) {
+      error = `引用暂不可用：${message(mentions.reason)}`;
     }
+    if (outlinks.status === "fulfilled") {
+      if (isCurrent()) this.outgoing = outlinks.value;
+    } else if (isCurrent()) {
+      error ??= `出链暂不可用：${message(outlinks.reason)}`;
+    }
+    return error;
   }
 
   /** @param items 编辑器解析出的标题；相同目录不触发重复更新。 */
@@ -120,16 +150,37 @@ export class ReaderNavigation {
     this.markdown?.jumpTo(pos);
   }
 
-  /** 打开当前文档的查找入口；附件预览与编辑器尚未挂载时不执行操作。 */
+  /**
+   * 在当前文档的活动大纲里按锚点定位标题。
+   *
+   * 大纲来自编辑器实时解析，未保存的新标题同样有效。
+   * @param anchor 锚点原文。
+   * @returns 是否找到并跳转。
+   */
+  jumpToHeadingText(anchor: string): boolean {
+    if (this.document.content?.kind !== "markdown" || this.markdown === null) return false;
+    if (anchor.startsWith("^")) return this.markdown.jumpToHeading(anchor);
+    const target = normalizeHeadingText(anchor);
+    const item = this.headings.find((heading) => normalizeHeadingText(heading.text) === target);
+    if (item === undefined) return false;
+    this.jumpOutline(item.pos);
+    return true;
+  }
+
+  /**
+   * 打开当前文档的查找入口；编辑器尚未挂载时不执行操作。
+   *
+   * 按已挂载表面分发：Markdown 的源码视图注册在代码通道上。
+   */
   openSearch = (): void => {
-    if (this.document.content?.kind === "markdown") this.markdown?.openSearch();
-    else if (this.document.content?.kind === "text") this.code?.openSearch();
+    if (this.markdown !== null) this.markdown.openSearch();
+    else this.code?.openSearch();
   };
 
   /** 文件操作完成后恢复写作焦点；只操作当前已挂载的编辑器，不改变选区或滚动位置。 */
   focusEditor = (): void => {
-    if (this.document.content?.kind === "markdown") this.markdown?.focus();
-    else if (this.document.content?.kind === "text") this.code?.focus();
+    if (this.markdown !== null) this.markdown.focus();
+    else this.code?.focus();
   };
 
   /** 注册与注销时不清目录，目录清理由编辑器 onOutline 负责，避免挂载时状态竞争。 */
@@ -144,15 +195,16 @@ export class ReaderNavigation {
     if (api !== null) this.applyPendingJump();
   };
 
-  /** @returns 当前编辑器的内容快照；编辑器未就绪或附件不支持编辑时抛出错误。 */
+  /**
+   * @returns 当前已挂载表面的内容快照；Markdown 源码视图走代码通道。
+   * @throws 编辑器未就绪或附件不支持编辑时抛出。
+   */
   snapshot = (): EditorSnapshot => {
-    if (this.document.content?.kind === "markdown") {
-      if (this.markdown === null) throw new Error("文档编辑器尚未就绪");
-      return this.markdown.snapshot();
-    }
-    if (this.document.content?.kind !== "text" || this.code === null)
-      throw new Error("文本编辑器尚未就绪");
-    return this.code.snapshot();
+    if (this.markdown !== null) return this.markdown.snapshot();
+    if (this.code !== null) return this.code.snapshot();
+    throw new Error(
+      this.document.content?.kind === "markdown" ? "文档编辑器尚未就绪" : "文本编辑器尚未就绪",
+    );
   };
 
   /**
@@ -164,7 +216,11 @@ export class ReaderNavigation {
     mention: MentionRecord,
     openFile: (path: string) => Promise<void>,
   ): Promise<void> {
-    this.pending = { mention, all: [...this.references.linked, ...this.references.unlinked] };
+    this.pending = {
+      kind: "mention",
+      mention,
+      all: [...this.references.linked, ...this.references.unlinked],
+    };
     try {
       if (mention.fromPath === this.document.path) this.applyPendingJump();
       else await openFile(mention.fromPath);
@@ -173,18 +229,83 @@ export class ReaderNavigation {
     }
   }
 
+  /**
+   * 打开搜索命中并等待其编辑器挂载后定位命中词；门禁阻止时取消定位。
+   * @param path 命中文件。
+   * @param needle 命中词；空串（纯谓词检索）只打开文件不定位。
+   * @param openFile 工作区提供的受保存门禁保护的文件切换。
+   */
+  async openTextMatch(
+    path: string,
+    needle: string,
+    openFile: (path: string) => Promise<void>,
+  ): Promise<void> {
+    this.pending = { kind: "text", path, needle };
+    try {
+      if (path === this.document.path) this.applyPendingJump();
+      else await openFile(path);
+    } finally {
+      if (this.document.path !== path) this.pending = null;
+    }
+  }
+
+  /**
+   * 打开锚点目标并等待其编辑器挂载后定位标题；门禁阻止时取消定位。
+   * @param path 目标文件。
+   * @param anchor 锚点原文。
+   * @param openFile 工作区提供的受保存门禁保护的文件切换。
+   * @param onMissing 目标文档里没有匹配标题时的可见反馈回调。
+   */
+  async openHeadingAnchor(
+    path: string,
+    anchor: string,
+    openFile: (path: string) => Promise<void>,
+    onMissing: () => void,
+  ): Promise<void> {
+    this.pending = { kind: "heading", path, anchor, onMissing };
+    try {
+      if (path === this.document.path) this.applyPendingJump();
+      else await openFile(path);
+    } finally {
+      if (this.document.path !== path) this.pending = null;
+    }
+  }
+
   private applyPendingJump(): void {
     const pending = this.pending;
-    if (pending === null || pending.mention.fromPath !== this.document.path) return;
-    if (this.document.content?.kind === "markdown") {
-      if (this.markdown === null) return;
+    if (pending === null) return;
+    if (pending.kind === "text") {
+      if (pending.path !== this.document.path) return;
+      // 全文索引只覆盖 Markdown；其余类型与空命中词都只打开文件。
+      if (
+        this.document.content?.kind === "markdown" &&
+        this.markdown !== null &&
+        pending.needle !== ""
+      )
+        this.markdown.jumpToText(pending.needle);
+      this.pending = null;
+      return;
+    }
+    if (pending.kind === "heading") {
+      if (pending.path !== this.document.path) return;
+      // 锚点只对 Markdown 有意义；其余类型只打开文件，不提示。
+      if (this.document.content?.kind === "markdown" && this.markdown !== null) {
+        if (!this.markdown.jumpToHeading(pending.anchor)) pending.onMissing();
+      }
+      this.pending = null;
+      return;
+    }
+    if (pending.mention.fromPath !== this.document.path) return;
+    if (this.markdown !== null) {
       this.markdown.jumpToMention(
         pending.mention,
         mentionOccurrenceIndex(pending.all, pending.mention),
       );
-    } else if (this.document.content?.kind === "text") {
-      if (this.code === null) return;
+      // Markdown 源码视图注册在代码通道：字节区间对原始源文本同样有效。
+    } else if (this.code !== null) {
       this.code.jumpToByte(pending.mention.startByte);
+    } else {
+      return;
     }
     this.pending = null;
   }

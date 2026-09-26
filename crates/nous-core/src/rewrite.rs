@@ -213,3 +213,19 @@ pub fn wiki_target_name(to_file: &str) -> String {
         .file_stem()
         .map_or_else(|| to_file.to_string(), |s| s.to_string_lossy().into_owned())
 }
+
+/// 路径形式 wiki 链接的新 target：保持原链接的形态。
+///
+/// 原目标带扩展名时改写为完整新路径；不带时去掉新路径的扩展名。
+/// 目录前缀始终跟随新路径，避免改名把无歧义的路径链接降级成歧义名称链接。
+#[must_use]
+pub fn wiki_target_path(original_target: &str, to_file: &str) -> String {
+    if Path::new(original_target).extension().is_some() {
+        return to_file.to_string();
+    }
+    let path = Path::new(to_file);
+    let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+        return to_file.to_string();
+    };
+    path_to_slashes(&path.with_file_name(stem)).unwrap_or_else(|_| to_file.to_string())
+}

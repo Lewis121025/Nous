@@ -37,6 +37,22 @@ fn rename_updates_wiki_and_markdown_links() {
 }
 
 #[test]
+fn rename_refuses_stem_that_collides_with_another_notes_title() {
+    let (root, _index, vault) = vault_with(&[
+        ("A.md", "[[B]]\n"),
+        ("B.md", "# B\n"),
+        ("Other.md", "# C\n"),
+    ]);
+    let before = fs::read(root.path().join("A.md")).expect("A");
+    let err = vault.rename("B.md", "C.md").expect_err("标题冲突");
+    let message = err.to_string();
+    assert!(message.contains("歧义"), "{message}");
+    assert_eq!(fs::read(root.path().join("A.md")).expect("A"), before);
+    assert!(root.path().join("B.md").exists());
+    assert!(!root.path().join("C.md").exists());
+}
+
+#[test]
 fn rename_refuses_existing_destination_and_leaves_bytes() {
     let (root, _index, vault) =
         vault_with(&[("A.md", "[[B]]\n"), ("B.md", "b\n"), ("C.md", "c\n")]);
@@ -269,4 +285,72 @@ fn moving_a_note_rebases_images_and_reference_definitions() {
         "![photo](../photo.png) [peer][p]\n\n[p]: ../A.md \"title\"\n"
     );
     assert_eq!(vault.links_from("nested/C.md").unwrap().len(), 2);
+}
+
+#[test]
+fn rename_rewrites_path_form_wiki_links_keeping_their_shape() {
+    let root = TempDir::new().expect("库");
+    let index = TempDir::new().expect("索引");
+    fs::create_dir_all(root.path().join("notes")).expect("建目录");
+    fs::write(root.path().join("notes/foo.md"), "# foo\n").expect("写目标");
+    fs::write(
+        root.path().join("ref.md"),
+        "[[notes/foo]] [[notes/foo.md|别名]] [[notes/foo#sec]] [[foo]]\n",
+    )
+    .expect("写引用");
+    let vault = Vault::open(root.path(), index.path()).expect("打开");
+
+    vault.rename("notes/foo.md", "notes/bar.md").expect("改名");
+
+    let reference = fs::read_to_string(root.path().join("ref.md")).expect("读引用");
+    assert!(reference.contains("[[notes/bar]]"), "{reference}");
+    assert!(reference.contains("[[notes/bar.md|别名]]"), "{reference}");
+    assert!(reference.contains("[[notes/bar#sec]]"), "{reference}");
+    // 名称形式保持名称形式。
+    assert!(reference.contains("[[bar]]"), "{reference}");
+    assert!(!reference.contains("foo"), "{reference}");
+    assert_eq!(vault.links_to("notes/bar.md").expect("入链").len(), 4);
+}
+
+#[test]
+fn directory_rename_updates_path_form_wiki_links() {
+    let root = TempDir::new().expect("库");
+    let index = TempDir::new().expect("索引");
+    fs::create_dir_all(root.path().join("dir")).expect("建目录");
+    fs::write(root.path().join("dir/note.md"), "# note\n").expect("写目标");
+    fs::write(
+        root.path().join("ref.md"),
+        "[[dir/note]] [x](./dir/note.md)\n",
+    )
+    .expect("写引用");
+    let vault = Vault::open(root.path(), index.path()).expect("打开");
+
+    vault.rename("dir", "archive").expect("目录改名");
+
+    let reference = fs::read_to_string(root.path().join("ref.md")).expect("读引用");
+    assert!(reference.contains("[[archive/note]]"), "{reference}");
+    assert!(reference.contains("[x](./archive/note.md)"), "{reference}");
+    assert_eq!(vault.links_to("archive/note.md").expect("入链").len(), 2);
+}
+
+#[test]
+fn path_form_links_are_not_blocked_by_bare_name_ambiguity() {
+    let root = TempDir::new().expect("库");
+    let index = TempDir::new().expect("索引");
+    for dir in ["a", "b"] {
+        fs::create_dir_all(root.path().join(dir)).expect("建目录");
+    }
+    fs::write(root.path().join("a/foo.md"), "# foo\n").expect("写 a/foo");
+    fs::write(root.path().join("b/bar.md"), "# bar\n").expect("写 b/bar");
+    fs::write(root.path().join("ref.md"), "[[a/foo]]\n").expect("写引用");
+    let vault = Vault::open(root.path(), index.path()).expect("打开");
+
+    // 改名后裸名 bar 会歧义，但引用是路径形式，重写后仍唯一解析，不应拒绝。
+    vault
+        .rename("a/foo.md", "a/bar.md")
+        .expect("路径形式不受名称歧义阻挡");
+
+    let reference = fs::read_to_string(root.path().join("ref.md")).expect("读引用");
+    assert!(reference.contains("[[a/bar]]"), "{reference}");
+    assert_eq!(vault.links_to("a/bar.md").expect("入链").len(), 1);
 }

@@ -1,11 +1,14 @@
 //! Nous 库内核。
 //!
-//! 负责打开笔记库、按相对路径读写原始字节，以及链接索引与改名事务。
+//! 负责打开笔记库、按相对路径读写原始字节，以及链接索引、派生索引
+//! （标题/标签/属性/全文）与改名事务。
 //! 本 crate 不依赖 Node-API，测试直接调用此处 API。
 
 mod attachments;
 mod entries;
 mod error;
+mod frontmatter;
+mod identity;
 mod index;
 mod link;
 mod mention;
@@ -16,6 +19,8 @@ mod rename_journal;
 mod rewrite;
 mod save;
 mod scan;
+mod search;
+mod tag;
 mod vault;
 mod watch;
 mod wiki;
@@ -23,11 +28,13 @@ mod wiki;
 pub use attachments::{ImportedAttachment, MAX_ATTACHMENT_BYTES};
 pub use entries::{EntryKind, VaultEntry};
 pub use error::Error;
-pub use link::{LinkKind, LinkRecord};
+pub use index::HeadingRecord;
+pub use link::{LinkKind, LinkRecord, LinkResolution, LinkTarget};
 pub use mention::{MentionKind, MentionRecord, Mentions};
 pub use pathutil::path_to_slashes;
 pub use recovery::Draft;
 pub use rename::RenameOutcome;
 pub use save::{FileSnapshot, SavedCopy, WriteOutcome};
+pub use search::{SearchHit, SearchQuery, SNIPPET_END, SNIPPET_START};
 pub use vault::Vault;
 pub use watch::{start_watch, WatchHandle};

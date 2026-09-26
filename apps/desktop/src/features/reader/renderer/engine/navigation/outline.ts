@@ -100,7 +100,12 @@ export function buildOutlineTree(items: OutlineItem[]): OutlineNode[] {
   return root;
 }
 
-function headingText(node: PmNode): string {
+/**
+ * 标题的可读文本：wiki 链接取别名（无别名取目标），行内公式取 TeX 源码。
+ *
+ * 大纲展示与锚点匹配共用同一提取规则，保证「看到的标题」就是「可链接的锚点」。
+ */
+export function headingText(node: PmNode): string {
   const parts: string[] = [];
   node.forEach((child) => {
     if (child.isText) {

@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use nous_core::{LinkKind, Vault, WriteOutcome};
+use nous_core::{LinkKind, LinkTarget, Vault, WriteOutcome};
 use std::fs;
 use tempfile::TempDir;
 
@@ -30,7 +30,10 @@ fn literal_backslash_and_directory_separator_have_distinct_inventory_and_links()
     ] {
         assert_eq!(
             vault.resolve_link("ref.md", raw, LinkKind::Markdown),
-            Some(target.to_string())
+            LinkTarget::Resolved {
+                path: target.to_string(),
+                anchor: None,
+            }
         );
         assert_eq!(vault.links_to(target).unwrap().len(), 1);
     }
@@ -125,7 +128,10 @@ fn attachments_stay_beside_notes_in_directories_with_literal_backslashes() {
             "./attachments/%E5%9B%BE.png",
             LinkKind::Markdown,
         ),
-        Some(attachment.path)
+        LinkTarget::Resolved {
+            path: attachment.path.clone(),
+            anchor: None,
+        }
     );
     assert!(!root.path().join("资料").exists());
 }

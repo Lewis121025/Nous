@@ -16,7 +16,11 @@
   import { createPdfNodeViews } from "../../engine/rendering/pdf-view";
   import { mathInputPlugins, mathNodeViews } from "../../engine/rendering/math-view";
   import { createMarkdownSession } from "../../engine/markdown/source-session";
+  import { findHeadingPmPos } from "../../engine/navigation/heading-anchor";
+  import { findBlockPmPos } from "../../engine/navigation/block-anchor";
+  import { createNoteEmbedViews } from "../../engine/rendering/note-embed-view";
   import { findMentionPmPos } from "../../engine/navigation/mention-jump";
+  import { findSearchMatchPmPos } from "../../engine/search/locate";
   import { type MediaIo, resolveMediaUrl } from "../../engine/media/media";
   import { collectOutline, type OutlineItem } from "../../engine/navigation/outline";
   import { writingPlugins } from "../../engine/editing/writing";
@@ -30,16 +34,26 @@
     type MarkdownReloadContext,
   } from "../../engine/editing/markdown-reload";
   import { applyMarkdownHistory, nativeInputOwnsHistory } from "../../engine/editing/history";
+  import { suggestRequest, type SuggestRequest } from "../../engine/editing/link-suggest/context";
+  import {
+    rankFileCandidates,
+    rankHeadingCandidates,
+    type LinkSuggestion,
+  } from "../../engine/editing/link-suggest/candidates";
+  import { linkSuggestPlugin, type SuggestKeymap } from "../../engine/editing/link-suggest/plugin";
+  import { suggestInsertion } from "../../engine/editing/link-suggest/insert";
   import EditorFormatting from "./EditorFormatting.svelte";
   import SelectionFormatting from "./SelectionFormatting.svelte";
   import EditorLink from "./EditorLink.svelte";
   import EditorSearch from "./EditorSearch.svelte";
   import EditorAttachments from "./EditorAttachments.svelte";
+  import LinkSuggestPopup from "./LinkSuggestPopup.svelte";
   import {
     createAttachmentEditing,
     type AttachmentProgress,
   } from "../../engine/editing/attachments";
   import type { AttachmentImporter } from "../../../shared/attachments";
+  import type { LinkKind } from "../../../shared/api";
 
   type Props = {
     /** 阅读器注入的资源访问能力，编辑器不依赖宿主应用。 */
@@ -73,6 +87,13 @@
     register: (api: MarkdownEditorApi | null) => void;
     /** 库内链接候选；仅用于交互，不参与文档挂载依赖。 */
     linkTargets?: string[];
+    /**
+     * 解析锚点补全的目标并返回其标题文本。
+     *
+     * 目标解析失败或没有标题时返回空列表；异常由提供方吞掉并降级为空候选，
+     * 补全是尽力而为的辅助能力，不打断写作。
+     */
+    suggestHeadings?: (target: string, syntax: LinkKind) => Promise<string[]>;
   };
 
   let {
@@ -89,6 +110,7 @@
     onOutline,
     register,
     linkTargets = [],
+    suggestHeadings,
   }: Props = $props();
   let host: HTMLDivElement | undefined = $state();
   let editor = $state.raw<EditorView | null>(null);
@@ -102,6 +124,110 @@
   let attachments = $state.raw<ReturnType<typeof createAttachmentEditing> | null>(null);
   let attachmentProgress = $state<AttachmentProgress>(null);
   let previous: MarkdownReloadContext | null = null;
+
+  /** 内联补全弹层状态；null 表示未触发。 */
+  type SuggestState = {
+    request: SuggestRequest;
+    items: LinkSuggestion[];
+    selected: number;
+    x: number;
+    top: number | null;
+    bottom: number | null;
+  };
+  let suggest = $state<SuggestState | null>(null);
+  let suggestGeneration = 0;
+
+  const suggestKeys: SuggestKeymap = {
+    active: () => suggest !== null && suggest.items.length > 0,
+    move: (delta) => {
+      const current = suggest;
+      if (current === null || current.items.length === 0) return;
+      const count = current.items.length;
+      suggest = { ...current, selected: (current.selected + delta + count) % count };
+    },
+    choose: () => chooseSuggestion(null),
+    cancel: () => closeSuggest(),
+  };
+
+  function closeSuggest(): void {
+    suggest = null;
+    suggestGeneration += 1;
+  }
+
+  /**
+   * 每次状态更新后重算补全上下文；文件候选同步产出，
+   * 标题候选异步加载并按代次丢弃过期响应。
+   */
+  function refreshSuggest(view: EditorView, state: EditorState): void {
+    const request = suggestRequest(state);
+    if (request === null) {
+      closeSuggest();
+      return;
+    }
+    // jsdom 没有布局；真实窗口极少数位置 coordsAtPos 也可能抛错，退化到原点。
+    let coords = { left: 0, top: 0, bottom: 0 };
+    try {
+      coords = view.coordsAtPos(request.from);
+    } catch {
+      // 保留默认坐标，弹层仍然可用。
+    }
+    const flip = coords.bottom + 288 > window.innerHeight;
+    const placed = {
+      x: Math.min(Math.max(coords.left, 8), Math.max(8, window.innerWidth - 348)),
+      top: flip ? null : coords.bottom + 4,
+      bottom: flip ? Math.max(window.innerHeight - coords.top + 4, 0) : null,
+    };
+    if (request.kind === "file") {
+      suggest = {
+        request,
+        items: rankFileCandidates(request.query, linkTargets),
+        selected: 0,
+        ...placed,
+      };
+      return;
+    }
+    // 同一目标的标题异步加载期间保留旧候选，避免闪烁。
+    const previousItems =
+      suggest !== null &&
+      suggest.request.kind === "heading" &&
+      suggest.request.target === request.target
+        ? suggest.items
+        : [];
+    suggest = { request, items: previousItems, selected: 0, ...placed };
+    const loader = suggestHeadings;
+    if (loader === undefined) return;
+    const generation = ++suggestGeneration;
+    void (async () => {
+      let headings: string[] = [];
+      try {
+        headings = await loader(request.target, request.syntax);
+      } catch {
+        // 提供方约定失败返回空列表；双重防护，避免未处理的拒绝。
+      }
+      const current = suggest;
+      if (generation !== suggestGeneration || current === null) return;
+      const items = rankHeadingCandidates(request.query, headings);
+      suggest = {
+        ...current,
+        items,
+        selected: Math.min(current.selected, Math.max(items.length - 1, 0)),
+      };
+    })();
+  }
+
+  /** 提交候选；事务构造与保真契约见 `suggestInsertion`。范围失效只关弹层。 */
+  function chooseSuggestion(index: number | null): void {
+    const current = suggest;
+    const view = editor;
+    if (current === null || view === null) return;
+    const chosen = current.items[index ?? current.selected];
+    closeSuggest();
+    if (chosen === undefined) return;
+    const tr = suggestInsertion(view.state, current.request, chosen.value);
+    if (tr === null) return;
+    view.dispatch(tr);
+    view.focus();
+  }
 
   function openAttachments(): void {
     formattingPanel?.dismiss();
@@ -152,6 +278,8 @@
           doc,
           ...(reload === null ? {} : { selection: reload.selection }),
           plugins: [
+            // 补全弹层激活时优先接管导航键；未激活时完全透明。
+            linkSuggestPlugin(suggestKeys),
             history(),
             attachmentEditing.plugin,
             search(),
@@ -183,6 +311,7 @@
           ...createHtmlNodeViews(loadMd),
           ...createImageNodeViews(loadAny),
           ...createPdfNodeViews(notePath, openLink, mediaIo),
+          ...createNoteEmbedViews(notePath, openLink, mediaIo),
         },
         dispatchTransaction(tr) {
           const { state: next, transactions } = created.state.applyTransaction(tr);
@@ -193,6 +322,7 @@
             dirty();
             pushOutline(collectOutline(next.doc));
           }
+          refreshSuggest(created, next);
         },
       });
       const stopRestoring = reload?.restore(created);
@@ -224,12 +354,30 @@
           }
           jumpEditor(created, pos, "center");
         },
+        jumpToText: (needle) => {
+          const pos = findSearchMatchPmPos(created.state.doc, needle);
+          if (pos === null) {
+            return;
+          }
+          jumpEditor(created, pos, "center");
+        },
+        jumpToHeading: (anchor) => {
+          const pos = anchor.startsWith("^")
+            ? findBlockPmPos(created.state.doc, anchor.slice(1))
+            : findHeadingPmPos(created.state.doc, anchor);
+          if (pos === null) {
+            return false;
+          }
+          jumpEditor(created, pos, "start");
+          return true;
+        },
       });
       return () => {
         stopRestoring?.();
         previous = captureMarkdownReload(created);
         pushOutline([]);
         bindApi(null);
+        closeSuggest();
         editor = null;
         editorState = null;
         attachments = null;
@@ -311,6 +459,20 @@
     />{/if}
 {/if}
 <div class="surface" bind:this={host}></div>
+{#if suggest !== null && suggest.items.length > 0}
+  <LinkSuggestPopup
+    items={suggest.items}
+    selected={suggest.selected}
+    x={suggest.x}
+    top={suggest.top}
+    bottom={suggest.bottom}
+    onChoose={(index) => chooseSuggestion(index)}
+    onHover={(index) => {
+      const current = suggest;
+      if (current !== null) suggest = { ...current, selected: index };
+    }}
+  />
+{/if}
 
 <style>
   .surface {

@@ -110,7 +110,7 @@ pub(crate) fn find_unlinked(
     let Ok(tree) = to_mdast(source, &mention_parse_options()) else {
         return Vec::new();
     };
-    let (_, links) = scan::scan_markdown(from_path, source);
+    let links = scan::scan_markdown(from_path, source).links;
     let occupied: Vec<(usize, usize)> = links
         .iter()
         .filter_map(|link| {

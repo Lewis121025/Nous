@@ -4,6 +4,7 @@ import { decodeString } from "micromark-util-decode-string";
 import type { Mark, Node as PmNode } from "prosemirror-model";
 import { markdownProcessor } from "./markdown-processor";
 import { previewKindFromReference } from "../media/media";
+import { noteEmbedFromParagraph } from "./embed";
 import { documentSchema } from "./schema";
 
 type Definitions = ReadonlyMap<string, Definition>;
@@ -12,15 +13,23 @@ type Definitions = ReadonlyMap<string, Definition>;
  * 把 Markdown 映射为文档，引用定义与脚注等未支持的节点也必须保留。
  *
  * @param source Markdown 原文。
+ * @param options `embeds` 为 false 时不把独立的 `![[笔记]]` 提升成嵌入块，用来渲染嵌入内容自身，避免互相嵌入时递归。
  * @returns schema 约束下的文档节点。
  * @throws 语法无法被处理器承载时失败，禁止静默丢弃内容。
  */
-export function parseMarkdown(source: string): PmNode {
+export function parseMarkdown(source: string, options?: { embeds?: boolean }): PmNode {
   const tree = markdownProcessor.parse(source);
   const definitions = new Map<string, Definition>();
   collectDefinitions(tree, definitions);
   const blocks = tree.children.map((node) => mapBlock(node, definitions));
-  return documentSchema.node("doc", null, blocks.length === 0 ? [paragraph()] : blocks);
+  const lifted = options?.embeds === false ? blocks : blocks.map(liftTopLevelEmbed);
+  return documentSchema.node("doc", null, lifted.length === 0 ? [paragraph()] : lifted);
+}
+
+/** 顶层只含一条笔记嵌入的段落提升为块；列表项仍必须从段落开始，不在这里提升。 */
+function liftTopLevelEmbed(block: PmNode): PmNode {
+  if (block.type.name !== "paragraph") return block;
+  return noteEmbedFromParagraph(block) ?? block;
 }
 
 function collectDefinitions(node: Nodes, definitions: Map<string, Definition>): void {

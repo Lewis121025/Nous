@@ -2,7 +2,9 @@ import type { CoreClient } from "../../../apps/desktop/src/main/core-client";
 import type { CoreRequest } from "../../../apps/desktop/src/main/core-protocol";
 import type {
   FileSnapshot,
+  HeadingRecord,
   Mentions,
+  SearchHit,
   WriteResult,
 } from "../../../apps/desktop/src/features/reader/shared/api";
 
@@ -34,6 +36,19 @@ const mentions: Promise<Mentions> = client.call("indexMentionsTo", "note.md");
 void mentions;
 // @ts-expect-error 提及查询必须指定库内路径。
 client.call("indexMentionsTo");
+
+const hits: Promise<SearchHit[]> = client.call("searchQuery", {
+  terms: ["全文"],
+  tags: [],
+  attributes: [],
+  pathContains: null,
+  limit: 100,
+});
+void hits;
+const headings: Promise<HeadingRecord[]> = client.call("indexHeadings", "note.md");
+void headings;
+// @ts-expect-error 检索必须提供结构化条件，不接受原始查询串。
+client.call("searchQuery", "tag:全文");
 
 // @ts-expect-error 应用会话接口不能写入阅读器状态。
 client.call("sessionPatch", { currentPath: "note.md" });

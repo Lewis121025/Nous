@@ -10,6 +10,8 @@ const { native, session } = vi.hoisted(() => ({
     fileSnapshot: vi.fn(),
     fileWrite: vi.fn(),
     indexMentionsTo: vi.fn(),
+    searchQuery: vi.fn(),
+    indexHeadings: vi.fn(),
     entryRename: vi.fn(),
     entryTrash: vi.fn(),
     entryCreate: vi.fn(),
@@ -30,27 +32,52 @@ beforeEach(() => {
     currentPath: "a.md",
     filesCollapsed: false,
     leftWidth: 232,
+    history: { back: [], forward: [] },
   });
 });
 
 describe("文件操作与会话提交", () => {
   it("附件导入核对笔记库归属，返回实际路径并传播提交后的索引警告", () => {
     const changed = vi.fn();
-    const service = createReaderService("/state", changed, { load: session.loadSession, save: session.saveSession });
+    const service = createReaderService("/state", changed, {
+      load: session.loadSession,
+      save: session.saveSession,
+    });
     service.vaultOpen("/first");
     native.attachmentImport.mockReturnValue({ path: "attachments/a (1).png", warning: "索引失败" });
     const bytes = new Uint8Array([0, 255]);
-    expect(service.attachmentImport("/first", "a.md", "a.png", bytes)).toEqual({ path: "attachments/a (1).png", warning: "索引失败" });
+    expect(service.attachmentImport("/first", "a.md", "a.png", bytes)).toEqual({
+      path: "attachments/a (1).png",
+      warning: "索引失败",
+    });
     expect(native.attachmentImport).toHaveBeenCalledWith("a.md", "a.png", Buffer.from(bytes));
-    expect(changed).toHaveBeenCalledWith({ status: "changed", paths: ["attachments/a (1).png"], healthy: false });
-    expect(() => service.attachmentImport("/second", "a.md", "a.png", bytes)).toThrow("笔记库已切换");
+    expect(changed).toHaveBeenCalledWith({
+      status: "changed",
+      paths: ["attachments/a (1).png"],
+      healthy: false,
+    });
+    expect(() => service.attachmentImport("/second", "a.md", "a.png", bytes)).toThrow(
+      "笔记库已切换",
+    );
     service.vaultClose();
-    expect(() => service.attachmentImport("/first", "a.md", "a.png", bytes)).toThrow("笔记库已切换");
+    expect(() => service.attachmentImport("/first", "a.md", "a.png", bytes)).toThrow(
+      "笔记库已切换",
+    );
     expect(native.attachmentImport).toHaveBeenCalledTimes(1);
   });
 
-  it("移动父文件夹后会话跟随子文件，成功通知只触发一次", () => {
-    session.loadSession.mockReturnValue({ vaultRoot: "/notes", currentPath: "old/sub/note.md" });
+  it("移动父文件夹后会话跟随子文件，阅读栈同口径迁移，成功通知只触发一次", () => {
+    session.loadSession.mockReturnValue({
+      vaultRoot: "/notes",
+      currentPath: "old/sub/note.md",
+      history: {
+        back: [
+          { path: "old/a.md", anchor: null },
+          { path: "keep.md", anchor: "小节" },
+        ],
+        forward: [{ path: "old/sub/note.md", anchor: null }],
+      },
+    });
     native.entryRename.mockReturnValue({});
     const changed = vi.fn();
     const service = createReaderService("/state", changed, {
@@ -61,6 +88,13 @@ describe("文件操作与会话提交", () => {
     expect(session.saveSession).toHaveBeenCalledWith({
       vaultRoot: "/notes",
       currentPath: "new/sub/note.md",
+      history: {
+        back: [
+          { path: "new/a.md", anchor: null },
+          { path: "keep.md", anchor: "小节" },
+        ],
+        forward: [{ path: "new/sub/note.md", anchor: null }],
+      },
     });
     expect(changed).toHaveBeenCalledTimes(1);
   });
@@ -71,16 +105,28 @@ describe("文件操作与会话提交", () => {
       load: session.loadSession,
       save: session.saveSession,
     });
-    session.loadSession.mockReturnValue({ currentPath: "old-archive/note.md" });
+    session.loadSession.mockReturnValue({
+      currentPath: "old-archive/note.md",
+      history: { back: [], forward: [] },
+    });
     service.entryTrash("old");
     expect(session.saveSession).not.toHaveBeenCalled();
-    session.loadSession.mockReturnValue({ currentPath: "old/sub/note.md" });
+    session.loadSession.mockReturnValue({
+      currentPath: "old/sub/note.md",
+      history: { back: [{ path: "old/sub/other.md", anchor: null }], forward: [] },
+    });
     service.entryTrash("old");
-    expect(session.saveSession).toHaveBeenCalledWith({ currentPath: null });
+    expect(session.saveSession).toHaveBeenCalledWith({
+      currentPath: null,
+      history: { back: [], forward: [] },
+    });
   });
 
   it("会话写入失败作为提交后警告，不把已经移动的文件报告成失败", () => {
-    session.loadSession.mockReturnValue({ currentPath: "old/note.md" });
+    session.loadSession.mockReturnValue({
+      currentPath: "old/note.md",
+      history: { back: [], forward: [] },
+    });
     session.saveSession.mockImplementationOnce(() => {
       throw new Error("disk full");
     });
@@ -108,9 +154,7 @@ it("工作线程返回已链接与未链接提及，未知种类作为索引错�
     toRaw: "target",
   };
   native.indexMentionsTo.mockReturnValue({
-    linked: [
-      { ...mention, kind: "linked", linkKind: "wiki" },
-    ],
+    linked: [{ ...mention, kind: "linked", linkKind: "wiki" }],
     unlinked: [{ ...mention, kind: "unlinked" }],
   });
   const service = createReaderService("/state", vi.fn(), {
@@ -127,6 +171,41 @@ it("工作线程返回已链接与未链接提及，未知种类作为索引错�
     unlinked: [],
   });
   expect(() => service.indexMentionsTo("target.md")).toThrow("提及索引包含无效");
+});
+
+it("检索条件与结果在工作线程边界结构化校验，损坏行不冒充空结果", () => {
+  const service = createReaderService("/state", vi.fn(), {
+    load: session.loadSession,
+    save: session.saveSession,
+  });
+  const query = {
+    terms: ["全文"],
+    tags: ["标签"],
+    attributes: [{ key: "status", value: "draft" }],
+    pathContains: null,
+    limit: 10,
+  };
+  native.searchQuery.mockReturnValue([
+    { path: "notes/a.md", title: "A", snippet: "命中\u{1}全文\u{2}词" },
+  ]);
+  expect(service.searchQuery(query)).toEqual([
+    { path: "notes/a.md", title: "A", snippet: "命中\u{1}全文\u{2}词" },
+  ]);
+  // null 路径过滤转换成原生层的 undefined；条件原样透传。
+  expect(native.searchQuery).toHaveBeenCalledWith({ ...query, pathContains: undefined });
+  native.searchQuery.mockReturnValue([{ path: "../逃逸.md", title: "A", snippet: "" }]);
+  expect(() => service.searchQuery(query)).toThrow("检索命中");
+  expect(() => service.searchQuery({ ...query, terms: "全文" } as never)).toThrow("全文词");
+  native.indexHeadings.mockReturnValue([
+    { path: "a.md", level: 2, text: "标题", startByte: 0, endByte: 9 },
+  ]);
+  expect(service.indexHeadings("a.md")).toEqual([
+    { path: "a.md", level: 2, text: "标题", startByte: 0, endByte: 9 },
+  ]);
+  native.indexHeadings.mockReturnValue([
+    { path: "a.md", level: 0, text: "标题", startByte: 0, endByte: 9 },
+  ]);
+  expect(() => service.indexHeadings("a.md")).toThrow("标题索引");
 });
 
 it("原生层的错误字节不能被 Uint8Array 转换成空文档", () => {

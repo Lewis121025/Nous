@@ -310,7 +310,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { vaultOpen, vaultClose, vaultList, vaultEntries, entryCreate, attachmentImport, entryTrash, entryPath, fileRead, fileSnapshot, filePreserveDraft, fileWrite, fileWriteCopy, linksResolve, indexLinksTo, indexLinksFrom, indexMentionsTo, entryRename } = nativeBinding
+const { vaultOpen, vaultClose, vaultList, vaultEntries, entryCreate, attachmentImport, entryTrash, entryPath, fileRead, fileSnapshot, filePreserveDraft, fileWrite, fileWriteCopy, linksResolve, indexLinksTo, indexLinksFrom, indexMentionsTo, searchQuery, indexHeadings, entryRename } = nativeBinding
 
 module.exports.vaultOpen = vaultOpen
 module.exports.vaultClose = vaultClose
@@ -329,4 +329,6 @@ module.exports.linksResolve = linksResolve
 module.exports.indexLinksTo = indexLinksTo
 module.exports.indexLinksFrom = indexLinksFrom
 module.exports.indexMentionsTo = indexMentionsTo
+module.exports.searchQuery = searchQuery
+module.exports.indexHeadings = indexHeadings
 module.exports.entryRename = entryRename

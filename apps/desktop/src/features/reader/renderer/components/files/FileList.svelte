@@ -2,11 +2,13 @@
   import { tick, untrack } from "svelte";
   import Sidebar from "./Sidebar.svelte";
   import FileTreeViewport from "./FileTreeViewport.svelte";
+  import SearchResults from "./SearchResults.svelte";
   import type { EntryDialogAction } from "./FileEntryDialog.svelte";
   import FileMenu from "./FileMenu.svelte";
-  import type { VaultEntry } from "../../../shared/api";
+  import type { SearchHit, VaultEntry } from "../../../shared/api";
   import type { ReaderWorkspaceController } from "../../state/workspace.svelte";
   import { isCompositionKey } from "../../engine/editing/composition";
+  import { matchNeedle } from "../../engine/search/query";
   import {
     ancestorDirectories,
     buildFileTree,
@@ -37,10 +39,13 @@
   let expanded = $state.raw<ReadonlySet<string>>(new Set());
   let selected = $state<string | null>(null);
   let focused = $state<string | null>(null);
-  let treeViewport: FileTreeViewport;
+  // 结果模式下文件树被卸载，引用可能为空；调用处统一可选链。
+  let treeViewport: FileTreeViewport | undefined = $state();
+  let searchResults: SearchResults | undefined = $state();
   let recoveryElement: HTMLElement | undefined = $state();
   let searchInput: HTMLInputElement;
   let menu: FileMenu;
+  const search = $derived(workspace.search);
   let dragging = $state<VaultEntry | null>(null);
   let dropTarget = $state<string | null>(null);
   let previousRoot: string | null | undefined;
@@ -94,7 +99,7 @@
   async function focusPath(path: string): Promise<void> {
     focused = path;
     await tick();
-    await treeViewport.focusPath(path);
+    await treeViewport?.focusPath(path);
   }
   async function activate(entry: VaultEntry): Promise<void> {
     selected = entry.recoveryOnly ? null : entry.path;
@@ -192,23 +197,54 @@
     if (next === null) searchInput.focus();
     else await focusPath(next);
   }
+  /** 清除按钮：退出结果模式并清空过滤词，回到完整文件树。 */
   function clearSearch(): void {
     if (workspace.isComposing) return;
+    search.reset();
     query = "";
-    treeViewport.resetScroll();
+    treeViewport?.resetScroll();
     searchInput.focus();
+  }
+  /** Escape：先退出结果模式（保留查询词供文件树过滤），再清空过滤词。 */
+  function escapeSearch(): void {
+    if (workspace.isComposing) return;
+    if (search.active) {
+      search.reset();
+      searchInput.focus();
+      return;
+    }
+    clearSearch();
+  }
+  /** 回车提交全文检索；检索完成后键盘进入结果列表。 */
+  async function submitSearch(): Promise<void> {
+    await search.run(query);
+    if (!search.active) return;
+    await tick();
+    searchResults?.focusFirst();
   }
   function searchKeydown(event: KeyboardEvent): void {
     if (isCompositionKey(event) || workspace.isComposing) return;
-    if (event.key === "Escape" && query !== "") {
+    if (event.key === "Escape" && (search.active || query !== "")) {
       event.preventDefault();
       event.stopPropagation();
-      clearSearch();
-    } else if (event.key === "ArrowDown" && (recoveries[0] || rows[0])) {
+      escapeSearch();
+    } else if (event.key === "Enter") {
       event.preventDefault();
-      if (recoveries[0]) void focusRecovery(recoveries[0].path);
+      void submitSearch();
+    } else if (event.key === "ArrowDown" && (search.active || recoveries[0] || rows[0])) {
+      event.preventDefault();
+      if (search.active) searchResults?.focusFirst();
+      else if (recoveries[0]) void focusRecovery(recoveries[0].path);
       else if (rows[0]) void focusPath(rows[0].node.path);
     }
+  }
+  /** 打开命中文件并定位命中词；门禁阻止切换时保持当前文档。 */
+  async function openHit(hit: SearchHit): Promise<void> {
+    const submitted = search.query;
+    if (submitted === null) return;
+    const needle = matchNeedle(hit, submitted);
+    await workspace.navigation.openTextMatch(hit.path, needle, workspace.openFile);
+    if (workspace.document.path === hit.path) onOpen();
   }
   function context(event: MouseEvent, entry: VaultEntry): void {
     event.preventDefault();
@@ -327,15 +363,16 @@
       ><input
         type="text"
         role="searchbox"
-        aria-label="搜索文件和文件夹"
+        aria-label="搜索文件和全文"
         aria-keyshortcuts="Meta+Shift+F Control+Shift+F"
-        placeholder="搜索文件"
+        placeholder="搜索文件，回车搜全文"
+        title="输入即过滤文件；回车全文搜索，支持 tag:标签、path:路径、属性名:值"
         bind:this={searchInput}
         bind:value={query}
-        oninput={() => treeViewport.resetScroll()}
+        oninput={() => treeViewport?.resetScroll()}
         onkeydown={searchKeydown}
       />
-      {#if query !== ""}
+      {#if query !== "" || search.active}
         <button
           type="button"
           class="clear-search"
@@ -346,118 +383,133 @@
         >
       {/if}
     </div>
-    {#if recoveries.length > 0}
-      <section class="recovery" aria-label="待恢复的笔记" bind:this={recoveryElement}>
-        <h2>待恢复的笔记</h2>
-        <p>原路径发生变化。打开笔记后，可另存副本。</p>
-        {#each recoveries as entry (entry.path)}
+    {#if search.active}
+      <SearchResults
+        bind:this={searchResults}
+        {search}
+        activePath={active}
+        onActivate={(hit) => void openHit(hit)}
+        onExit={escapeSearch}
+      />
+    {:else}
+      {#if recoveries.length > 0}
+        <section class="recovery" aria-label="待恢复的笔记" bind:this={recoveryElement}>
+          <h2>待恢复的笔记</h2>
+          <p>原路径发生变化。打开笔记后，可另存副本。</p>
+          {#each recoveries as entry (entry.path)}
+            <button
+              type="button"
+              class="recovery-entry"
+              class:active={entry.path === active}
+              data-path={entry.path}
+              aria-current={entry.path === active ? "page" : undefined}
+              title={entry.path}
+              disabled={busy}
+              onclick={() => void activate(entry)}
+            >
+              <span class="name">{entry.path.split("/").at(-1)}</span>
+              <span class="recovery-path">{entry.path}</span>
+            </button>
+          {/each}
+        </section>
+      {/if}
+      <FileTreeViewport
+        bind:this={treeViewport}
+        {rows}
+        {focusable}
+        dragging={dragging?.path ?? null}
+      >
+        {#snippet children(row)}
           <button
             type="button"
-            class="recovery-entry"
-            class:active={entry.path === active}
-            data-path={entry.path}
-            aria-current={entry.path === active ? "page" : undefined}
-            title={entry.path}
+            role="treeitem"
+            class="file"
+            class:folder={row.node.kind === "directory"}
+            class:active={row.node.kind === "file" && row.node.path === active}
+            class:dragging={dragging?.path === row.node.path}
+            class:drop-target={dropTarget === row.node.path}
+            data-path={row.node.path}
+            style:--depth={row.depth}
+            tabindex={focusable === row.node.path ? 0 : -1}
+            aria-level={row.depth + 1}
+            aria-posinset={row.position}
+            aria-setsize={row.siblings}
+            aria-selected={selected === row.node.path}
+            aria-current={row.node.kind === "file" && row.node.path === active ? "page" : undefined}
+            aria-expanded={row.node.kind === "directory"
+              ? searching || expanded.has(row.node.path)
+              : undefined}
+            title={row.node.path}
             disabled={busy}
-            onclick={() => void activate(entry)}
+            draggable={!busy}
+            onfocus={() => {
+              focused = row.node.path;
+              selected = row.node.path;
+            }}
+            onclick={() => void activate(row.node)}
+            onkeydown={(event) => keydown(event, row)}
+            oncontextmenu={(event) => context(event, row.node)}
+            ondragstart={(event) => {
+              dragging = { path: row.node.path, kind: row.node.kind };
+              event.dataTransfer?.setData("text/plain", row.node.path);
+              if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+            }}
+            ondragend={() => {
+              dragging = null;
+              dropTarget = null;
+            }}
+            ondragover={(event) => {
+              if (row.node.kind === "directory") allowDrop(event, row.node.path);
+            }}
+            ondragleave={() => {
+              dropTarget = null;
+            }}
+            ondrop={(event) => {
+              if (row.node.kind === "directory") void drop(event, row.node.path);
+            }}
           >
-            <span class="name">{entry.path.split("/").at(-1)}</span>
-            <span class="recovery-path">{entry.path}</span>
+            <span class="chevron" class:expanded={searching || expanded.has(row.node.path)}
+              >{#if row.node.kind === "directory"}<svg viewBox="0 0 16 16" aria-hidden="true"
+                  ><path d="m6 4 4 4-4 4" /></svg
+                >{/if}</span
+            >
+            <svg class="entry-icon" viewBox="0 0 20 20" aria-hidden="true"
+              >{#if row.node.kind === "directory"}<path
+                  d="M2.5 5a1 1 0 0 1 1-1h4l2 2h7a1 1 0 0 1 1 1v9h-15z"
+                />{:else}<path d="M5 2.5h6l4 4v11H5zM11 2.5v4h4" />{/if}</svg
+            >
+            <span class="name">{row.node.name}</span>
+            {#if row.node.kind === "file" && row.node.path === active}<span
+                class="current-dot"
+                aria-hidden="true"
+                title="正在阅读"
+              ></span>{/if}
           </button>
-        {/each}
-      </section>
-    {/if}
-    <FileTreeViewport bind:this={treeViewport} {rows} {focusable} dragging={dragging?.path ?? null}>
-      {#snippet children(row)}
-        <button
-          type="button"
-          role="treeitem"
-          class="file"
-          class:folder={row.node.kind === "directory"}
-          class:active={row.node.kind === "file" && row.node.path === active}
-          class:dragging={dragging?.path === row.node.path}
-          class:drop-target={dropTarget === row.node.path}
-          data-path={row.node.path}
-          style:--depth={row.depth}
-          tabindex={focusable === row.node.path ? 0 : -1}
-          aria-level={row.depth + 1}
-          aria-posinset={row.position}
-          aria-setsize={row.siblings}
-          aria-selected={selected === row.node.path}
-          aria-current={row.node.kind === "file" && row.node.path === active ? "page" : undefined}
-          aria-expanded={row.node.kind === "directory"
-            ? searching || expanded.has(row.node.path)
-            : undefined}
-          title={row.node.path}
-          disabled={busy}
-          draggable={!busy}
-          onfocus={() => {
-            focused = row.node.path;
-            selected = row.node.path;
-          }}
-          onclick={() => void activate(row.node)}
-          onkeydown={(event) => keydown(event, row)}
-          oncontextmenu={(event) => context(event, row.node)}
-          ondragstart={(event) => {
-            dragging = { path: row.node.path, kind: row.node.kind };
-            event.dataTransfer?.setData("text/plain", row.node.path);
-            if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-          }}
-          ondragend={() => {
-            dragging = null;
-            dropTarget = null;
-          }}
-          ondragover={(event) => {
-            if (row.node.kind === "directory") allowDrop(event, row.node.path);
-          }}
-          ondragleave={() => {
-            dropTarget = null;
-          }}
-          ondrop={(event) => {
-            if (row.node.kind === "directory") void drop(event, row.node.path);
-          }}
-        >
-          <span class="chevron" class:expanded={searching || expanded.has(row.node.path)}
-            >{#if row.node.kind === "directory"}<svg viewBox="0 0 16 16" aria-hidden="true"
-                ><path d="m6 4 4 4-4 4" /></svg
-              >{/if}</span
-          >
-          <svg class="entry-icon" viewBox="0 0 20 20" aria-hidden="true"
-            >{#if row.node.kind === "directory"}<path
-                d="M2.5 5a1 1 0 0 1 1-1h4l2 2h7a1 1 0 0 1 1 1v9h-15z"
-              />{:else}<path d="M5 2.5h6l4 4v11H5zM11 2.5v4h4" />{/if}</svg
-          >
-          <span class="name">{row.node.name}</span>
-          {#if row.node.kind === "file" && row.node.path === active}<span
-              class="current-dot"
-              aria-hidden="true"
-              title="正在阅读"
-            ></span>{/if}
-        </button>
-      {/snippet}
-    </FileTreeViewport>
-    {#if rows.length === 0 && recoveries.length === 0}
-      <div class="empty">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h6l2 2h8v13H4z" /></svg>
-        <strong>{searching ? "没有匹配的文件" : "这里还很安静"}</strong>
-        <p>
-          {searching
-            ? "试试其他关键词，或查看全部文件。"
-            : workspace.vaultRoot === null
-              ? "打开笔记库，让想法有个归处。"
-              : "写下第一篇笔记，从这里开始。"}
-        </p>
-        {#if searching}
-          <button type="button" class="empty-action" onclick={clearSearch}>查看全部文件</button>
-        {:else if workspace.vaultRoot !== null}
-          <button
-            type="button"
-            class="empty-action"
-            disabled={busy}
-            onclick={() => beginCreate("file")}>新建笔记</button
-          >
-        {/if}
-      </div>
+        {/snippet}
+      </FileTreeViewport>
+      {#if rows.length === 0 && recoveries.length === 0}
+        <div class="empty">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h6l2 2h8v13H4z" /></svg>
+          <strong>{searching ? "没有匹配的文件" : "这里还很安静"}</strong>
+          <p>
+            {searching
+              ? "试试其他关键词，或查看全部文件。"
+              : workspace.vaultRoot === null
+                ? "打开笔记库，让想法有个归处。"
+                : "写下第一篇笔记，从这里开始。"}
+          </p>
+          {#if searching}
+            <button type="button" class="empty-action" onclick={clearSearch}>查看全部文件</button>
+          {:else if workspace.vaultRoot !== null}
+            <button
+              type="button"
+              class="empty-action"
+              disabled={busy}
+              onclick={() => beginCreate("file")}>新建笔记</button
+            >
+          {/if}
+        </div>
+      {/if}
     {/if}
   </nav>
 </Sidebar>

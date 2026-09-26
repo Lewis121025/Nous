@@ -1,0 +1,123 @@
+/** @vitest-environment jsdom */
+import { flushSync } from "svelte";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ReaderWorkspaceController } from "@reader/renderer/state/workspace.svelte";
+import type { ReaderApi } from "@reader/shared/api";
+import type { SessionHistory } from "@reader/shared/session";
+import { createReaderApiMock } from "../../fixtures/reader-api-mock";
+
+const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function createApi(overrides: Partial<ReaderApi> = {}): ReaderApi {
+  return createReaderApiMock({
+    vaultEntries: vi.fn(async () => [
+      { path: "a.md", kind: "file" as const },
+      { path: "b.md", kind: "file" as const },
+      { path: "c.md", kind: "file" as const },
+    ]),
+    fileSnapshot: vi.fn(async (path: string) => ({
+      disk: encode(`# ${path}\n\n正文。\n`),
+      draft: null,
+    })),
+    ...overrides,
+  });
+}
+
+async function startWorkspace(api: ReaderApi): Promise<ReaderWorkspaceController> {
+  const workspace = new ReaderWorkspaceController(api);
+  await workspace.restore();
+  flushSync();
+  return workspace;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("阅读栈导航", () => {
+  it("打开文件依次入栈，后退与前进按浏览器语义移动", async () => {
+    const sessionSetHistory = vi.fn(async () => {});
+    const workspace = await startWorkspace(createApi({ sessionSetHistory }));
+    await workspace.openFile("a.md");
+    await workspace.openFile("b.md");
+    await workspace.openFile("c.md");
+    expect(workspace.document.path).toBe("c.md");
+    expect(workspace.history.canBack).toBe(true);
+
+    await workspace.navigateBack();
+    await settle();
+    expect(workspace.document.path).toBe("b.md");
+    await workspace.navigateBack();
+    await settle();
+    expect(workspace.document.path).toBe("a.md");
+    expect(workspace.history.canForward).toBe(true);
+
+    await workspace.navigateForward();
+    await settle();
+    expect(workspace.document.path).toBe("b.md");
+
+    // 新导航使前进栈失效。
+    await workspace.openFile("c.md");
+    await settle();
+    expect(workspace.history.canForward).toBe(false);
+
+    // 每次移动都持久化快照。
+    const last = sessionSetHistory.mock.calls.at(-1)?.[0] as SessionHistory;
+    expect(last.back.map((entry) => entry.path)).toEqual(["a.md", "b.md"]);
+  });
+
+  it("空栈时后退前进不动文档也不报错", async () => {
+    const workspace = await startWorkspace(createApi());
+    await workspace.openFile("a.md");
+    await workspace.navigateBack();
+    await settle();
+    expect(workspace.document.path).toBe("a.md");
+    await workspace.navigateForward();
+    await settle();
+    expect(workspace.document.path).toBe("a.md");
+  });
+
+  it("恢复会话时按当前文件列表过滤失效条目", async () => {
+    const workspace = await startWorkspace(
+      createApi({
+        vaultRestore: vi.fn(async () => ({
+          root: "/notes",
+          currentPath: "b.md",
+          history: {
+            back: [
+              { path: "gone.md", anchor: null },
+              { path: "a.md", anchor: null },
+            ],
+            forward: [],
+          },
+        })),
+      }),
+    );
+    expect(workspace.document.path).toBe("b.md");
+    await workspace.navigateBack();
+    await settle();
+    expect(workspace.document.path).toBe("a.md");
+    expect(workspace.history.canBack).toBe(false);
+  });
+
+  it("重命名后历史条目跟随新路径", async () => {
+    const workspace = await startWorkspace(createApi());
+    await workspace.openFile("a.md");
+    await workspace.openFile("b.md");
+    await workspace.renameEntry("a.md", "renamed.md");
+    await settle();
+    await workspace.navigateBack();
+    await settle();
+    expect(workspace.document.path).toBe("renamed.md");
+  });
+
+  it("删除文件后其历史条目被移除", async () => {
+    const workspace = await startWorkspace(createApi());
+    await workspace.openFile("a.md");
+    await workspace.openFile("b.md");
+    await workspace.trashEntry("a.md");
+    await settle();
+    expect(workspace.history.canBack).toBe(false);
+  });
+});

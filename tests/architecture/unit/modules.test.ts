@@ -55,7 +55,14 @@ describe("功能模块依赖边界", () => {
     const allowedStates: Record<string, readonly string[]> = {
       "document.svelte": [],
       "navigation.svelte": ["document.svelte"],
-      "workspace.svelte": ["document.svelte", "navigation.svelte"],
+      "search.svelte": [],
+      "history.svelte": [],
+      "workspace.svelte": [
+        "document.svelte",
+        "navigation.svelte",
+        "search.svelte",
+        "history.svelte",
+      ],
     };
     const violations: string[] = [];
     for (const [module, allowed] of Object.entries(allowedStates)) {

@@ -38,6 +38,10 @@ name = "links_unit_scan"
 path = "../../tests/links/unit/scan.rs"
 
 [[test]]
+name = "links_unit_resolve"
+path = "../../tests/links/unit/resolve.rs"
+
+[[test]]
 name = "links_unit_mentions"
 path = "../../tests/links/unit/mentions.rs"
 
@@ -48,6 +52,22 @@ path = "../../tests/links/integration/rename.rs"
 [[test]]
 name = "links_integration_rename_recovery"
 path = "../../tests/links/integration/rename_recovery.rs"
+
+[[test]]
+name = "search_unit_tags"
+path = "../../tests/search/unit/tags.rs"
+
+[[test]]
+name = "search_unit_headings"
+path = "../../tests/search/unit/headings.rs"
+
+[[test]]
+name = "search_integration_fulltext"
+path = "../../tests/search/integration/fulltext.rs"
+
+[[test]]
+name = "search_integration_index_sync"
+path = "../../tests/search/integration/index_sync.rs"
 
 [dev-dependencies]
 rusqlite = { version = "0.40.2", features = ["bundled"] }
@@ -69,3 +89,4 @@ regex = "1.13.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.11.0"
 tempfile = "3.23.0"
+yaml-rust2 = "0.13"

@@ -10,7 +10,11 @@
     removeLink,
     linkSelectionKey,
   } from "../../engine/editing/link-editing";
-  import { createCompositionGuard } from "../../engine/editing/composition";
+  import {
+    rankFileCandidates,
+    type LinkSuggestion,
+  } from "../../engine/editing/link-suggest/candidates";
+  import { createCompositionGuard, isCompositionKey } from "../../engine/editing/composition";
 
   let { view, targets, onClose }: { view: EditorView; targets: string[]; onClose: () => void } =
     $props();
@@ -23,6 +27,57 @@
   let input: HTMLInputElement;
   const targetListId = $props.id();
   const composition = createCompositionGuard();
+
+  /** 目标输入的补全候选；与编辑器内联补全共用同一排序。 */
+  let suggestItems = $state<LinkSuggestion[]>([]);
+  let suggestSelected = $state(0);
+  let suggestOpen = $state(false);
+
+  function refreshSuggest(): void {
+    // 对话框里只在有输入时展示候选；空输入弹全量列表会干扰撤销等操作。
+    if (kind !== "wiki" || target.trim() === "") {
+      suggestOpen = false;
+      return;
+    }
+    suggestItems = rankFileCandidates(target, targets);
+    suggestSelected = 0;
+    suggestOpen = suggestItems.length > 0;
+  }
+
+  function applySuggestion(index: number): void {
+    const item = suggestItems[index];
+    if (item === undefined) return;
+    target = item.value;
+    suggestOpen = false;
+  }
+
+  function moveSuggestion(delta: number): void {
+    if (suggestItems.length === 0) return;
+    suggestSelected = (suggestSelected + delta + suggestItems.length) % suggestItems.length;
+  }
+
+  function targetKeydown(event: KeyboardEvent): void {
+    if (isCompositionKey(event) || composition.active) return;
+    if (!suggestOpen || suggestItems.length === 0) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveSuggestion(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveSuggestion(-1);
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      // 候选打开时 Enter 选择而不是提交表单；Tab 同样先消费给补全。
+      event.preventDefault();
+      event.stopPropagation();
+      applySuggestion(suggestSelected);
+    } else if (event.key === "Escape") {
+      // 第一层 Escape 只收候选列表，再按才关对话框。
+      event.preventDefault();
+      event.stopPropagation();
+      suggestOpen = false;
+    }
+  }
+
   onMount(() => {
     view.dispatch(view.state.tr.setMeta(linkSelectionKey, true));
     const { from, to } = view.state.selection;
@@ -80,7 +135,7 @@
   <form onsubmit={submit}>
     <h2 id={`${targetListId}-title`}>{existing ? "编辑链接" : "插入链接"}</h2>
     <label
-      >链接类型 <select class="reader-input" bind:value={kind}
+      >链接类型 <select class="reader-input" bind:value={kind} onchange={refreshSuggest}
         ><option value="wiki">库内笔记</option><option value="md">网页或文件</option></select
       ></label
     >
@@ -92,13 +147,34 @@
         autocomplete="off"
         spellcheck="false"
         required
-        list={kind === "wiki" ? targetListId : undefined}
+        role="combobox"
+        aria-expanded={suggestOpen && suggestItems.length > 0}
+        aria-controls={suggestOpen && suggestItems.length > 0 ? targetListId : undefined}
         placeholder={kind === "wiki" ? "选择或输入笔记路径" : "https:// 或相对路径"}
+        oninput={refreshSuggest}
+        onkeydown={targetKeydown}
       /></label
     >
-    <datalist id={targetListId}
-      >{#each targets as path (path)}<option value={path}></option>{/each}</datalist
-    >
+    {#if suggestOpen && suggestItems.length > 0}
+      <!-- 无障碍名称避开「链接目标」子串，防止与输入框标签在自动化定位中冲突。 -->
+      <ul class="target-suggest" id={targetListId} role="listbox" aria-label="补全候选">
+        {#each suggestItems as item, index (item.value)}
+          <li
+            role="option"
+            aria-selected={index === suggestSelected}
+            class:selected={index === suggestSelected}
+            onmousedown={(event) => {
+              event.preventDefault();
+              applySuggestion(index);
+            }}
+            onmousemove={() => (suggestSelected = index)}
+          >
+            <span>{item.label}</span>
+            {#if item.detail !== item.label}<span class="detail">{item.detail}</span>{/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
     <label
       >显示文字 <input
         class="reader-input"
@@ -175,5 +251,32 @@
   p {
     color: var(--danger);
     margin: 0;
+  }
+  .target-suggest {
+    list-style: none;
+    margin: -0.4rem 0 0;
+    padding: 0.25rem;
+    max-height: 12rem;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--bg);
+  }
+  .target-suggest li {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.4rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  .target-suggest li.selected {
+    background: var(--selected);
+  }
+  .target-suggest .detail {
+    color: var(--muted);
+    font-size: 0.7rem;
+    overflow-wrap: anywhere;
   }
 </style>

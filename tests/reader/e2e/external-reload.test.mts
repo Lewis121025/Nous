@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { expect, test } from "vitest";
-import { _electron as electron } from "playwright-core";
+import { _electron as electron, type Locator } from "playwright-core";
 
 const desktop = new URL("../../../apps/desktop/", import.meta.url);
 const require = createRequire(new URL("package.json", desktop));
@@ -59,16 +59,26 @@ test("外部更新长文后保留反向选区、阅读位置和焦点，继续�
       )
       .toBe(true);
     const endKey = process.platform === "darwin" ? "Meta+ArrowRight" : "End";
+    /**
+     * 以接近真人的节奏从行尾反向选中五个字符并返回选中文本。
+     *
+     * ProseMirror/CodeMirror 在把选区同步回 DOM 后有约 50ms 的选区同步抑制
+     * 窗口；CDP 的零间隔连发会让末尾按键的 selectionchange 被吞掉，编辑器
+     * 状态落后于 DOM 选区，重载恢复时选区变短（历史上本用例的高频抖动源）。
+     * 键间等待让每次按键独立成同步回合，收尾再补发一次 selectionchange 兜底。
+     */
+    const selectTrailingFive = async (target: Locator): Promise<string> => {
+      await target.click();
+      await page.keyboard.press(endKey);
+      for (let i = 0; i < 5; i++) {
+        await page.keyboard.press("Shift+ArrowLeft");
+        await page.waitForTimeout(60);
+      }
+      await page.evaluate(() => document.dispatchEvent(new Event("selectionchange")));
+      return page.evaluate(() => window.getSelection()?.toString() ?? "");
+    };
     await expect
-      .poll(
-        async () => {
-          await paragraph.click();
-          await page.keyboard.press(endKey);
-          for (let i = 0; i < 5; i++) await page.keyboard.press("Shift+ArrowLeft");
-          return page.evaluate(() => window.getSelection()?.toString() ?? "");
-        },
-        { timeout: 5000, interval: 50 },
-      )
+      .poll(() => selectTrailingFive(paragraph), { timeout: 10000, interval: 50 })
       .toBe("继续写作。");
     const before = await page.evaluate(() => {
       const selection = window.getSelection();
@@ -185,15 +195,7 @@ test("外部更新长文后保留反向选区、阅读位置和焦点，继续�
     await code.locator('input[name="search"]').press("Escape");
     const codeParagraph = code.locator(".cm-line").filter({ hasText: "继续写作。" });
     await expect
-      .poll(
-        async () => {
-          await codeParagraph.click();
-          await page.keyboard.press(endKey);
-          for (let i = 0; i < 5; i++) await page.keyboard.press("Shift+ArrowLeft");
-          return page.evaluate(() => window.getSelection()?.toString() ?? "");
-        },
-        { timeout: 5000, interval: 50 },
-      )
+      .poll(() => selectTrailingFive(codeParagraph), { timeout: 10000, interval: 50 })
       .toBe("继续写作。");
     const codeTop = (await codeParagraph.boundingBox())?.y;
     if (codeTop === undefined) throw new Error("文本位置不存在");

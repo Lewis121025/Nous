@@ -19,7 +19,7 @@
     indentOnInput,
     syntaxHighlighting,
   } from "@codemirror/language";
-  import { EditorState, Compartment, EditorSelection } from "@codemirror/state";
+  import { EditorState, Compartment, EditorSelection, type Extension } from "@codemirror/state";
   import { EditorView, keymap, lineNumbers } from "@codemirror/view";
   import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
   import type { CodeEditorApi } from "../../engine/editing/editor-api";
@@ -44,9 +44,11 @@
     onSave: () => void;
     /** 注册/注销取文本入口。 */
     register: (api: CodeEditorApi | null) => void;
+    /** 额外编辑扩展；Markdown 源码视图用于 `[[` 链接补全。 */
+    completions?: Extension;
   };
 
-  let { source, path, onDirty, onSave, register }: Props = $props();
+  let { source, path, onDirty, onSave, register, completions }: Props = $props();
   let host: HTMLDivElement | undefined = $state();
   let editorState = $state.raw<EditorState | null>(null);
   let previous: CodeReloadContext | null = null;
@@ -135,6 +137,7 @@
               },
             }),
             langConf.of([]),
+            ...(completions === undefined ? [] : [completions]),
           ],
         }),
       });

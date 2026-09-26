@@ -1,3 +1,22 @@
+/**
+ * 从链接目标里分开资源路径和 `#` 锚点。
+ *
+ * `?` 与 `#` 之后都不再属于路径；空片段视为没有锚点。
+ * 创建笔记和嵌入笔记必须用同一套切分，否则锚点会留在文件名里。
+ *
+ * @param raw 链接原文或 wiki 目标，可以带查询和片段。
+ * @returns 去掉首尾空白的路径，以及 `#` 之后的锚点。
+ */
+export function splitLinkResource(raw: string): { path: string; anchor: string | null } {
+  const trimmed = raw.trim();
+  const index = trimmed.search(/[?#]/u);
+  if (index < 0) return { path: trimmed, anchor: null };
+  const suffix = trimmed.slice(index);
+  const hash = suffix.indexOf("#");
+  const anchor = hash < 0 ? "" : suffix.slice(hash + 1);
+  return { path: trimmed.slice(0, index).trim(), anchor: anchor === "" ? null : anchor };
+}
+
 /** 判断目标是否声明 URL 协议；内部相对路径不交给操作系统。 */
 export function hasUrlScheme(target: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(target.trim());

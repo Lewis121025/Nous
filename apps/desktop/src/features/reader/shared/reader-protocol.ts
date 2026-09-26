@@ -1,16 +1,21 @@
 import type {
+  HeadingRecord,
   LinkKind,
   LinkRecord,
+  LinkTarget,
   MentionRecord,
   Mentions,
   PaneLayout,
   RenameOutcome,
   SavedCopy,
+  SearchHit,
+  SearchQuery,
   VaultEntry,
   VaultRestore,
   WriteResult,
 } from "./api";
 import { SIDEBAR_LAYOUT } from "./api";
+import { parseSessionHistory } from "./session";
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -95,6 +100,31 @@ export function parseNullableRelativePath(value: unknown): string | null {
   throw new Error("当前文档或链接响应包含无效的库内路径");
 }
 
+/**
+ * 链接解析响应按状态判别：resolved 必须带有效库内路径，ambiguous 必须带
+ * 非空候选列表；空锚点归一化为 null，损坏响应整体拒绝而不是退化成死链。
+ */
+export function parseLinkTarget(value: unknown): LinkTarget {
+  if (record(value)) {
+    let anchor: string | null = null;
+    if (value.anchor !== undefined && value.anchor !== null) {
+      if (typeof value.anchor !== "string") throw new Error("链接解析响应无效");
+      if (value.anchor !== "") anchor = value.anchor;
+    }
+    if (value.status === "resolved" && relativePath(value.path))
+      return { status: "resolved", path: value.path, anchor };
+    if (
+      value.status === "ambiguous" &&
+      Array.isArray(value.candidates) &&
+      value.candidates.length > 0 &&
+      value.candidates.every((candidate: unknown) => relativePath(candidate))
+    )
+      return { status: "ambiguous", candidates: value.candidates, anchor };
+    if (value.status === "dead") return { status: "dead" };
+  }
+  throw new Error("链接解析响应无效");
+}
+
 /** 恢复库路径与当前文档必须来自同一个完整响应；无效响应抛错，不伪装成空库。 */
 export function parseVaultRestore(value: unknown): VaultRestore | null {
   if (value === null) return null;
@@ -103,7 +133,12 @@ export function parseVaultRestore(value: unknown): VaultRestore | null {
     path(value.root) &&
     (value.currentPath === null || relativePath(value.currentPath))
   )
-    return { root: value.root, currentPath: value.currentPath };
+    return {
+      root: value.root,
+      currentPath: value.currentPath,
+      // 阅读栈是恢复性数据：损坏条目按会话解析规则丢弃，不拒绝整个恢复。
+      history: parseSessionHistory(value.history),
+    };
   throw new Error("笔记库恢复响应无效，请重新打开笔记库");
 }
 
@@ -161,6 +196,11 @@ export function parseLinkKindArgument(value: unknown): LinkKind {
   return value;
 }
 
+/** 索引解析状态不允许回退；缺字段会把死链和歧义混成同一种未解析。 */
+function linkResolution(value: unknown): value is "resolved" | "ambiguous" | "dead" | "self" {
+  return value === "resolved" || value === "ambiguous" || value === "dead" || value === "self";
+}
+
 /** 链接原文允许空字符串，由内核按语法决定是否可解析；其他值必须拒绝。 */
 export function parseLinkText(value: unknown): string {
   if (typeof value !== "string") throw new Error("链接目标必须是文本");
@@ -177,6 +217,7 @@ export function parseLinkRecords(value: unknown): LinkRecord[] {
       typeof item.toRaw !== "string" ||
       (item.toPath !== null && !relativePath(item.toPath)) ||
       (item.kind !== "wiki" && item.kind !== "md") ||
+      !linkResolution(item.resolution) ||
       !byteOffset(item.startByte) ||
       !byteOffset(item.endByte) ||
       item.endByte < item.startByte
@@ -187,6 +228,7 @@ export function parseLinkRecords(value: unknown): LinkRecord[] {
       toRaw: item.toRaw,
       toPath: item.toPath,
       kind: item.kind,
+      resolution: item.resolution,
       startByte: item.startByte,
       endByte: item.endByte,
     };
@@ -236,4 +278,86 @@ export function parseMentions(value: unknown): Mentions {
     linked: value.linked.map((item: unknown) => parseMention(item, "linked")),
     unlinked: value.unlinked.map((item: unknown) => parseMention(item, "unlinked")),
   };
+}
+
+function parseStringList(value: unknown, label: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${label}必须是文本列表`);
+  return value.map((item: unknown) => {
+    if (typeof item !== "string") throw new Error(`${label}必须是文本列表`);
+    return item;
+  });
+}
+
+/**
+ * 校验结构化检索条件；查询文本的谓词解析发生在渲染层，主进程不接受原始查询串。
+ *
+ * `limit` 截断为整数并压到 0–500：0 由内核解释为默认上限，超出内核对 `i32`
+ * 的表示范围会在原生边界报错，必须提前收敛。
+ */
+export function parseSearchQueryArgument(value: unknown): SearchQuery {
+  if (!record(value)) throw new Error("检索条件无效");
+  const attributes = Array.isArray(value.attributes)
+    ? value.attributes.map((item: unknown) => {
+        if (!record(item) || typeof item.key !== "string" || typeof item.value !== "string")
+          throw new Error("属性谓词必须是键值文本对");
+        return { key: item.key, value: item.value };
+      })
+    : null;
+  if (attributes === null) throw new Error("属性谓词必须是键值文本对");
+  let pathContains: string | null = null;
+  if (value.pathContains !== null && value.pathContains !== undefined) {
+    if (typeof value.pathContains !== "string") throw new Error("检索条件的路径过滤必须是文本");
+    pathContains = value.pathContains;
+  }
+  if (typeof value.limit !== "number" || !Number.isFinite(value.limit))
+    throw new Error("检索条件的结果上限无效");
+  return {
+    terms: parseStringList(value.terms, "全文词"),
+    tags: parseStringList(value.tags, "标签谓词"),
+    attributes,
+    pathContains,
+    limit: Math.min(Math.trunc(value.limit), 500),
+  };
+}
+
+/** 检索命中逐项校验；摘要里的控制字符是合法的命中标记，不做过滤。 */
+export function parseSearchHits(value: unknown): SearchHit[] {
+  if (!Array.isArray(value)) throw new Error("检索响应无效");
+  return value.map((item: unknown) => {
+    if (
+      !record(item) ||
+      !relativePath(item.path) ||
+      typeof item.title !== "string" ||
+      typeof item.snippet !== "string"
+    )
+      throw new Error("检索命中包含无效路径、标题或摘要");
+    return { path: item.path, title: item.title, snippet: item.snippet };
+  });
+}
+
+/** 标题记录逐项校验；字节区间将被映射为编辑器位置，损坏数据必须整体拒绝。 */
+export function parseHeadingRecords(value: unknown): HeadingRecord[] {
+  if (!Array.isArray(value)) throw new Error("标题索引响应无效");
+  return value.map((item: unknown) => {
+    if (
+      !record(item) ||
+      !relativePath(item.path) ||
+      typeof item.level !== "number" ||
+      !Number.isInteger(item.level) ||
+      item.level < 1 ||
+      item.level > 6 ||
+      typeof item.text !== "string" ||
+      !byteOffset(item.startByte) ||
+      !byteOffset(item.endByte) ||
+      item.endByte < item.startByte
+    )
+      throw new Error("标题索引包含无效等级或定位范围");
+    return {
+      path: item.path,
+      level: item.level,
+      text: item.text,
+      startByte: item.startByte,
+      endByte: item.endByte,
+    };
+  });
 }

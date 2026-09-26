@@ -106,7 +106,11 @@ export async function resolveMediaUrl(
  */
 export function createBrowserMediaIo(api: Pick<ReaderApi, "linksResolve" | "fileRead">): MediaIo {
   return {
-    resolveLink: (from, raw, kind) => api.linksResolve(from, raw, kind),
+    // 媒体加载只认唯一解析；歧义与死链按不可加载处理，锚点对媒体无意义。
+    resolveLink: async (from, raw, kind) => {
+      const target = await api.linksResolve(from, raw, kind);
+      return target.status === "resolved" ? target.path : null;
+    },
     readFile: (rel) => api.fileRead(rel),
     createUrl: (bytes, mime) => {
       const copy = new Uint8Array(bytes.byteLength);

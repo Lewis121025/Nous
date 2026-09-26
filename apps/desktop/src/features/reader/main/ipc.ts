@@ -3,6 +3,7 @@ import { externalUrl } from "../shared/link-target";
 import type { PaneLayout } from "../shared/api";
 import { parseAttachmentRequest, type AttachmentReply } from "../shared/attachments";
 import { parseDraftRequest, type DraftReply } from "../shared/editor-recovery";
+import { parseSessionHistory } from "../shared/session";
 import type { ReaderService } from "./service";
 import {
   parseEntryKind,
@@ -11,6 +12,7 @@ import {
   parseNullableRelativePath,
   parsePaneLayoutMessage,
   parsePathArgument,
+  parseSearchQueryArgument,
   parseWriteRequest,
 } from "../shared/reader-protocol";
 
@@ -50,6 +52,10 @@ export function registerReaderIpc(getWindow: () => BrowserWindow | null, core: R
     const currentPath = parseNullableRelativePath(path);
     return core.call("readerSessionPatch", { currentPath });
   });
+
+  ipcMain.handle("reader.session.setHistory", (_event, history: unknown) =>
+    core.call("readerSessionPatch", { history: parseSessionHistory(history) }),
+  );
 
   ipcMain.handle("reader.session.getPanes", async (): Promise<PaneLayout> => {
     const session = await core.call("readerSessionLoad");
@@ -160,6 +166,12 @@ export function registerReaderIpc(getWindow: () => BrowserWindow | null, core: R
   );
   ipcMain.handle("reader.index.mentionsTo", (_event, path: unknown) =>
     core.call("indexMentionsTo", parsePathArgument(path)),
+  );
+  ipcMain.handle("reader.search.query", (_event, query: unknown) =>
+    core.call("searchQuery", parseSearchQueryArgument(query)),
+  );
+  ipcMain.handle("reader.index.headings", (_event, path: unknown) =>
+    core.call("indexHeadings", parsePathArgument(path)),
   );
   ipcMain.handle("reader.entry.rename", (_event, from: unknown, to: unknown) =>
     core.call("entryRename", parsePathArgument(from), parsePathArgument(to)),

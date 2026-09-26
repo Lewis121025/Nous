@@ -37,7 +37,10 @@ export function parseAppCommand(value: unknown): AppCommand | null {
     value === "find" ||
     value === "find-files" ||
     value === "insert-attachment" ||
-    value === "toggle-files"
+    value === "toggle-files" ||
+    value === "go-back" ||
+    value === "go-forward" ||
+    value === "toggle-source"
     ? value
     : null;
 }

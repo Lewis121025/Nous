@@ -7,12 +7,14 @@ import {
   parseEmptyReply,
   parseEntryOutcome,
   parseFileBytes,
+  parseHeadingRecords,
   parseLinkRecords,
+  parseLinkTarget,
   parseMentions,
   parseNullablePath,
-  parseNullableRelativePath,
   parsePaneLayoutMessage,
   parseSavedCopy,
+  parseSearchHits,
   parseVaultEntries,
   parseVaultList,
   parseVaultRestore,
@@ -28,6 +30,8 @@ export function createReaderApi(): ReaderApi {
     vaultRestore: async () => parseVaultRestore(await ipcRenderer.invoke("reader.vault.restore")),
     sessionSetCurrent: async (path) =>
       parseEmptyReply(await ipcRenderer.invoke("reader.session.setCurrent", path)),
+    sessionSetHistory: async (history) =>
+      parseEmptyReply(await ipcRenderer.invoke("reader.session.setHistory", history)),
     sessionGetPanes: async () =>
       parsePaneLayoutMessage(await ipcRenderer.invoke("reader.session.getPanes")),
     sessionSetPanes: async (panes) =>
@@ -57,13 +61,17 @@ export function createReaderApi(): ReaderApi {
     fileWriteCopy: async (rel, bytes, expected) =>
       parseSavedCopy(await ipcRenderer.invoke("reader.file.writeCopy", rel, bytes, expected)),
     linksResolve: async (from, raw, kind) =>
-      parseNullableRelativePath(await ipcRenderer.invoke("reader.links.resolve", from, raw, kind)),
+      parseLinkTarget(await ipcRenderer.invoke("reader.links.resolve", from, raw, kind)),
     indexLinksTo: async (path) =>
       parseLinkRecords(await ipcRenderer.invoke("reader.index.linksTo", path)),
     indexMentionsTo: async (path) =>
       parseMentions(await ipcRenderer.invoke("reader.index.mentionsTo", path)),
     indexLinksFrom: async (path) =>
       parseLinkRecords(await ipcRenderer.invoke("reader.index.linksFrom", path)),
+    searchQuery: async (query) =>
+      parseSearchHits(await ipcRenderer.invoke("reader.search.query", query)),
+    indexHeadings: async (path) =>
+      parseHeadingRecords(await ipcRenderer.invoke("reader.index.headings", path)),
     entryRename: async (from, to) =>
       parseEntryOutcome(await ipcRenderer.invoke("reader.entry.rename", from, to)),
     subscribeVaultChanged: (callback) => {

@@ -61,7 +61,11 @@ test.skipIf(process.platform === "win32")(
     const { core, events } = start();
     await core.call("vaultOpen", root);
     assert.deepEqual(await core.call("vaultList"), [nested, literal, "ref.md"]);
-    assert.equal(await core.call("linksResolve", "ref.md", "./group%5Cnote.md", "md"), literal);
+    assert.deepEqual(await core.call("linksResolve", "ref.md", "./group%5Cnote.md", "md"), {
+      status: "resolved",
+      path: literal,
+      anchor: null,
+    });
     assert.equal((await core.call("indexLinksTo", literal)).length, 1);
     assert.equal((await core.call("indexLinksTo", nested)).length, 1);
     await writeFile(join(root, literal), "external");
@@ -150,7 +154,10 @@ test("附件字节穿过原生线程，独占导入并阻止迟到请求写入�
   const copy = await core.call("attachmentImport", root, "资料/笔记.md", "图片 #1.png", binary);
   assert.equal(copy.path, "资料/attachments/图片 #1 (1).png");
   assert.deepEqual(await core.call("fileRead", first.path), binary);
-  assert.equal(await core.call("linksResolve", "资料/笔记.md", "./attachments/%E5%9B%BE%E7%89%87%20%231.png", "md"), first.path);
+  assert.deepEqual(
+    await core.call("linksResolve", "资料/笔记.md", "./attachments/%E5%9B%BE%E7%89%87%20%231.png", "md"),
+    { status: "resolved", path: first.path, anchor: null },
+  );
   await assert.rejects(core.call("attachmentImport", root, "资料/笔记.md", "../outside.png", binary));
   await core.call("vaultOpen", second);
   await core.call("entryCreate", "资料", "directory");
@@ -200,8 +207,12 @@ test("built worker preserves native save, conflict, copy, rename and link contra
   await writeFile(join(root, "ref.md"), "[[a]]\n");
   const { core } = start();
   assert.equal(await core.call("vaultOpen", root), root);
-  assert.equal(await core.call("linksResolve", "ref.md", "a", "wiki"), "a.md");
-  assert.equal(await core.call("linksResolve", "ref.md", "missing", "wiki"), null);
+  assert.deepEqual(await core.call("linksResolve", "ref.md", "a", "wiki"), {
+    status: "resolved",
+    path: "a.md",
+    anchor: null,
+  });
+  assert.deepEqual(await core.call("linksResolve", "ref.md", "missing", "wiki"), { status: "dead" });
   const links = await core.call("indexLinksTo", "a.md");
   assert.ok(links[0]);
   assert.equal(links[0].fromPath, "ref.md");
@@ -270,7 +281,11 @@ test("queued writes stay in their original vault and shutdown drains the final s
   assert.equal(await readFile(join(second, "a.md"), "utf8"), "second saved");
 
   const { core: restored } = start();
-  assert.deepEqual(await restored.call("vaultRestore"), { root: second, currentPath: "a.md" });
+  assert.deepEqual(await restored.call("vaultRestore"), {
+    root: second,
+    currentPath: "a.md",
+    history: { back: [], forward: [] },
+  });
   assert.equal((await restored.call("readerSessionLoad")).filesCollapsed, true);
   const panes = await restored.call("readerSessionLoad");
   assert.equal(panes.leftWidth, 240);
@@ -299,6 +314,126 @@ test("failed vault switches retain the active vault and previous session", async
   await mkdir(sessionPath);
   await assert.rejects(core.call("vaultOpen", second));
   assert.equal(text(await core.call("fileRead", "a.md")), "first");
+});
+
+test("链接消歧候选与标题锚点穿过原生解析", async (t) => {
+  const {
+    roots: [root],
+    start,
+  } = await fixture(t);
+  await Promise.all([mkdir(join(root, "a")), mkdir(join(root, "b"))]);
+  await Promise.all([
+    writeFile(join(root, "a/foo.md"), "# A\n\n## 深入小节\n\n正文。\n"),
+    writeFile(join(root, "b/foo.md"), "# B\n"),
+    writeFile(join(root, "ref.md"), "[[foo]] [[a/foo#深入小节]] [[#本地]]\n"),
+  ]);
+  const { core } = start();
+  await core.call("vaultOpen", root);
+
+  // 裸名多义返回全部候选，不静默取一。
+  assert.deepEqual(await core.call("linksResolve", "ref.md", "foo", "wiki"), {
+    status: "ambiguous",
+    candidates: ["a/foo.md", "b/foo.md"],
+    anchor: null,
+  });
+  // 路径形式消歧并分离锚点。
+  assert.deepEqual(await core.call("linksResolve", "ref.md", "a/foo#深入小节", "wiki"), {
+    status: "resolved",
+    path: "a/foo.md",
+    anchor: "深入小节",
+  });
+  // 纯锚点链接指向源文件自身。
+  assert.deepEqual(await core.call("linksResolve", "ref.md", "#本地", "wiki"), {
+    status: "resolved",
+    path: "ref.md",
+    anchor: "本地",
+  });
+  // Markdown 锚点按 URL 规则百分号解码。
+  assert.deepEqual(await core.call("linksResolve", "ref.md", "./a/foo.md#%E6%B7%B1%E5%85%A5%20x", "md"), {
+    status: "resolved",
+    path: "a/foo.md",
+    anchor: "深入 x",
+  });
+  // 歧义链接在索引里保持死链语义，路径形式可以入图。
+  const links = await core.call("indexLinksFrom", "ref.md");
+  const bare = links.find((link) => link.toRaw === "foo");
+  const pathForm = links.find((link) => link.toRaw === "a/foo#深入小节");
+  assert.equal(bare?.toPath, null);
+  assert.equal(pathForm?.toPath, "a/foo.md");
+});
+
+test("检索与标题索引穿过原生线程，中文短词、标签与属性谓词可用", async (t) => {
+  const {
+    roots: [root],
+    start,
+  } = await fixture(t);
+  const source = "---\nstatus: draft\ntags: [project]\n---\n\n# 设计笔记\n\n这是全文检索的正文 #inline-tag\n\n## 第二小节\n";
+  await Promise.all([
+    writeFile(join(root, "note.md"), source),
+    writeFile(join(root, "other.md"), "# 其它\n\n无关正文\n"),
+  ]);
+  const { core } = start();
+  await core.call("vaultOpen", root);
+
+  const empty = { terms: [], tags: [], attributes: [], pathContains: null, limit: 100 };
+  // 长词走 trigram MATCH；命中标题的文件排在仅命中正文之前。
+  const fulltext = await core.call("searchQuery", { ...empty, terms: ["全文检索"] });
+  assert.deepEqual(
+    fulltext.map((hit) => hit.path),
+    ["note.md"],
+  );
+  assert.ok(fulltext[0]?.snippet.includes("全文检索"));
+  assert.equal(fulltext[0]?.title, "设计笔记");
+  // 1 字中文短词走 LIKE 回落，结果一致。
+  const short = await core.call("searchQuery", { ...empty, terms: ["笔"] });
+  assert.deepEqual(
+    short.map((hit) => hit.path),
+    ["note.md"],
+  );
+  // 标签谓词：frontmatter 与行内标签同表可查。
+  for (const tag of ["project", "inline-tag", "#PROJECT"]) {
+    const hits = await core.call("searchQuery", { ...empty, tags: [tag] });
+    assert.deepEqual(
+      hits.map((hit) => hit.path),
+      ["note.md"],
+      `标签 ${tag} 应命中`,
+    );
+  }
+  // 属性谓词大小写不敏感。
+  const byAttribute = await core.call("searchQuery", {
+    ...empty,
+    attributes: [{ key: "STATUS", value: "Draft" }],
+  });
+  assert.deepEqual(
+    byAttribute.map((hit) => hit.path),
+    ["note.md"],
+  );
+  // 标题索引供锚点解析与补全。
+  const headings = await core.call("indexHeadings", "note.md");
+  assert.deepEqual(
+    headings.map((heading) => [heading.level, heading.text]),
+    [
+      [1, "设计笔记"],
+      [2, "第二小节"],
+    ],
+  );
+  assert.ok(headings[0] && headings[0].endByte > headings[0].startByte);
+
+  // 保存后派生索引增量更新：旧词消失、新词可查、标题与标签同步。
+  assert.deepEqual(await core.call("fileWrite", "note.md", bytes("# 设计笔记\n\n重写之后的正文\n"), bytes(source)), {
+    status: "saved",
+    warning: null,
+  });
+  assert.deepEqual(await core.call("searchQuery", { ...empty, terms: ["全文检索"] }), []);
+  assert.deepEqual(
+    (await core.call("searchQuery", { ...empty, terms: ["重写之后"] })).map((hit) => hit.path),
+    ["note.md"],
+  );
+  assert.deepEqual(await core.call("searchQuery", { ...empty, tags: ["project"] }), []);
+  assert.deepEqual(
+    (await core.call("indexHeadings", "note.md")).map((heading) => heading.text),
+    ["设计笔记"],
+  );
 });
 
 test("native watcher refreshes the active vault and releases it on close", async (t) => {

@@ -1,12 +1,24 @@
 import type { LinkKind, ReaderApi, VaultEntry, RenameOutcome } from "../../shared/api";
+import { deadLinkCreatePath, type DeadLinkOffer } from "../engine/navigation/dead-link";
 import { externalUrl, hasUrlScheme } from "../../shared/link-target";
 import type { AttachmentImporter } from "../../shared/attachments";
 import { createAutosave } from "../engine/document/autosave";
 import { ReaderDocument } from "./document.svelte";
+import { ReaderHistory, type ReadingStep } from "./history.svelte";
 import { ReaderNavigation } from "./navigation.svelte";
+import { ReaderSearch } from "./search.svelte";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 标题锚点与 `^` 块引用共用跳转失败文案。 */
+function missingAnchor(anchor: string | null, openedFile: boolean): string {
+  const kind = anchor?.startsWith("^") ? "块" : "标题";
+  const label = anchor ?? "";
+  return openedFile
+    ? `未找到${kind}「${label}」，已打开文件开头`
+    : `未找到${kind}「${label}」，锚点可能已失效`;
 }
 
 /** 成功反馈只属于产生它的文档版本；需要处理的错误不随输入自动消失。 */
@@ -23,6 +35,16 @@ export class ReaderWorkspaceController {
   readonly document: ReaderDocument;
   /** 与当前文档绑定的目录、引用与定位。 */
   readonly navigation: ReaderNavigation;
+  /** 全库搜索；结果属于当前库，切库必须丢弃。 */
+  readonly search: ReaderSearch;
+  /** 阅读栈：后退/前进导航与落点恢复。 */
+  readonly history: ReaderHistory;
+  /** 当前文档的导航落点；进入阅读栈的下一个条目。 */
+  private currentStep: { path: string; anchor: string | null } | null = null;
+  /** Markdown 文档的当前视图；默认排版。 */
+  private view = $state<"wysiwyg" | "source">("wysiwyg");
+  /** 会话内按文件记住源码视图选择；不持久化，重启回到排版。非响应式记录表。 */
+  private readonly sourceViews: Record<string, true> = {};
   private root = $state<string | null>(null);
   private listed = $state<VaultEntry[]>([]);
   private filePaths = $derived(
@@ -33,6 +55,9 @@ export class ReaderWorkspaceController {
   private transitioning = $state(true);
   private duplicating = $state(false);
   private composing = $state(false);
+  private candidateSelection = $state<{ paths: string[]; anchor: string | null } | null>(null);
+  /** 死链可以创建的笔记；`null` 表示没有等待确认的创建。 */
+  private deadLink = $state<DeadLinkOffer | null>(null);
   private refreshEpoch = 0;
   private pendingRefresh = false;
   private idleWaiters: Array<() => void> = [];
@@ -43,6 +68,8 @@ export class ReaderWorkspaceController {
   constructor(private readonly api: ReaderApi) {
     this.document = new ReaderDocument(api);
     this.navigation = new ReaderNavigation(this.document);
+    this.search = new ReaderSearch(api);
+    this.history = new ReaderHistory();
     this.autosave = createAutosave({
       isDirty: () => this.document.dirty && !this.composing,
       save: () => this.persist(),
@@ -84,6 +111,48 @@ export class ReaderWorkspaceController {
   get healthMessage() {
     return this.backgroundError;
   }
+  /** 当前 Markdown 文档的视图模式；非 Markdown 文档该值无意义。 */
+  get viewMode(): "wysiwyg" | "source" {
+    return this.view;
+  }
+
+  /**
+   * 切换排版/源码视图。
+   *
+   * 排版文档模型是 Markdown 的有损投影；源码视图直接编辑字节，
+   * 「排版表达不了的语法保存时被重写」由源码模式从构造上消除。
+   * 切换以当前活动表面的快照为交接文本：未保存编辑随文本带过去，
+   * 保存基准与脏标记不变。存在无法保真保存的编辑（needsSourceRepair）
+   * 时拒绝切换——恢复记录属于排版会话，不能静默丢弃。
+   */
+  toggleViewMode = async (): Promise<void> => {
+    const path = this.document.path;
+    if (path === null || this.document.content?.kind !== "markdown") return;
+    if (this.transitioning || this.duplicating || this.composing) return;
+    if (this.document.needsSourceRepair) {
+      this.report("当前文档存在无法保真保存的编辑，请先处理保存问题再切换视图。");
+      return;
+    }
+    try {
+      // 先冲刷挂起的保存；冲突失败时编辑随快照文本带到新表面。
+      await this.autosave.flush();
+      if (this.transitioning || this.duplicating || this.document.path !== path) return;
+      // ignoreBOM：BOM 是文件字节的一部分，切换视图必须原样带走。
+      const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+        this.navigation.snapshot().bytes,
+      );
+      this.document.replaceSourceText(text);
+      this.view = this.view === "wysiwyg" ? "source" : "wysiwyg";
+      if (this.view === "source") this.sourceViews[path] = true;
+      else delete this.sourceViews[path];
+      // 新表面挂载在微任务里；尽力把焦点交过去，失败不打断切换。
+      await Promise.resolve();
+      this.navigation.focusEditor();
+    } catch (error) {
+      this.report(`切换视图失败：${errorText(error)}`, error);
+    }
+  };
+
   /** 切换期间界面禁止编辑，避免异步加载覆盖输入。 */
   get switching() {
     return this.transitioning;
@@ -188,10 +257,20 @@ export class ReaderWorkspaceController {
       const restored = await this.api.vaultRestore();
       if (restored === null) return;
       this.root = restored.root;
+      this.search.reset();
       await this.refreshList();
-      if (restored.currentPath !== null && this.files.includes(restored.currentPath)) {
+      // 阅读栈按当前文件列表过滤；已删除文件的条目不再误导导航。
+      const files = this.files;
+      this.history.restore(restored.history, (path) => files.includes(path));
+      if (restored.currentPath !== null && files.includes(restored.currentPath)) {
         await this.loadFile(restored.currentPath);
-      } else await this.api.sessionSetCurrent(null);
+        // 初始落点不入栈：与浏览器一致，恢复的起点没有「上一步」。
+        this.currentStep = { path: restored.currentPath, anchor: null };
+      } else {
+        await this.api.sessionSetCurrent(null);
+        this.currentStep = null;
+      }
+      this.persistHistory();
     } catch (error) {
       this.report(error instanceof Error ? error.message : "恢复会话失败");
     } finally {
@@ -208,6 +287,12 @@ export class ReaderWorkspaceController {
         this.root = root;
         this.backgroundError = "";
         this.clearDocument();
+        this.search.reset();
+        this.candidateSelection = null;
+        this.deadLink = null;
+        // 阅读栈属于旧库；会话侧的清空由主进程 vaultOpen 负责。
+        this.history.clear();
+        this.currentStep = null;
         this.report("");
         await this.refreshList();
       });
@@ -220,11 +305,69 @@ export class ReaderWorkspaceController {
   openFile = async (path: string): Promise<void> => {
     if (path === this.document.path) return;
     try {
-      await this.withSavedDocument(() => this.loadFile(path));
+      await this.withSavedDocument(async () => {
+        // 门禁已通过、加载成功才入栈：失败不留下幽灵历史。
+        const previous = this.captureCurrentStep();
+        await this.loadFile(path);
+        if (previous !== null) this.history.pushStep(previous);
+        this.currentStep = { path, anchor: null };
+        this.persistHistory();
+      });
     } catch (error) {
       this.report(`打开文件失败：${errorText(error)}`);
     }
   };
+
+  /** 后退到上一个阅读位置；门禁拒绝或栈空时不动。 */
+  navigateBack = async (): Promise<void> => {
+    await this.navigateHistory("back");
+  };
+
+  /** 前进到下一个阅读位置；门禁拒绝或栈空时不动。 */
+  navigateForward = async (): Promise<void> => {
+    await this.navigateHistory("forward");
+  };
+
+  private async navigateHistory(direction: "back" | "forward"): Promise<void> {
+    if (this.currentStep === null) return;
+    const current = this.history.captureStep(this.currentStep);
+    const target = direction === "back" ? this.history.peekBack() : this.history.peekForward();
+    if (target === null) return;
+    try {
+      await this.withSavedDocument(async () => {
+        if (target.path !== this.document.path) await this.loadFile(target.path);
+        if (direction === "back") this.history.commitBack(current);
+        else this.history.commitForward(current);
+        this.currentStep = { path: target.path, anchor: target.anchor };
+        if (target.anchor !== null) {
+          // 锚点落点优先于滚动位置；标题已失效时打开文件并可见提示。
+          await this.navigation.openHeadingAnchor(target.path, target.anchor, this.openFile, () =>
+            this.report(missingAnchor(target.anchor, true)),
+          );
+        } else {
+          this.history.applyScroll(target);
+        }
+        this.persistHistory();
+      });
+    } catch (error) {
+      this.report(`${direction === "back" ? "后退" : "前进"}失败：${errorText(error)}`);
+    }
+  }
+
+  /** 当前落点加滚动位置；没有打开文档时为 null。 */
+  private captureCurrentStep(): ReadingStep | null {
+    return this.currentStep === null ? null : this.history.captureStep(this.currentStep);
+  }
+
+  /**
+   * 阅读栈写入会话；失败不打断导航。
+   *
+   * 会话文件故障已由同链路的 `sessionSetCurrent` 写入可见地上报，
+   * 这里不重复弹同一条错误。
+   */
+  private persistHistory(): void {
+    void this.api.sessionSetHistory(this.history.snapshot()).catch(() => {});
+  }
 
   /** @param kind 链接语法。@param raw 链接原文；过期解析结果不切换新文档。 */
   openLink = async (kind: LinkKind, raw: string): Promise<void> => {
@@ -236,15 +379,123 @@ export class ReaderWorkspaceController {
         await this.api.openExternal(externalUrl(raw));
         return;
       }
-      const to = await this.api.linksResolve(path, raw, kind);
+      const target = await this.api.linksResolve(path, raw, kind);
       if (epoch !== this.document.epoch || this.transitioning || this.duplicating) return;
-      if (to === null) {
-        this.report("死链，无法跳转");
-        return;
+      switch (target.status) {
+        case "dead": {
+          const offer = deadLinkCreatePath(path, raw, kind);
+          if (offer === null) {
+            this.report("死链，无法跳转");
+            return;
+          }
+          this.deadLink = offer;
+          return;
+        }
+        case "ambiguous":
+          // 同名多候选不静默取一，交给用户选择；锚点在选择后继续生效。
+          this.candidateSelection = { paths: target.candidates, anchor: target.anchor };
+          return;
+        case "resolved":
+          await this.openResolved(target.path, target.anchor);
+          return;
       }
-      await this.openFile(to);
     } catch (error) {
       if (epoch === this.document.epoch) this.report(`打开链接失败：${errorText(error)}`);
+    }
+  };
+
+  /** 歧义链接的候选（升序）；`null` 表示没有等待中的选择。 */
+  get linkCandidates() {
+    return this.candidateSelection;
+  }
+
+  /** 关闭候选选择，不打开任何目标。 */
+  dismissLinkCandidates = (): void => {
+    this.candidateSelection = null;
+  };
+
+  /** 等待确认的死链创建；`null` 表示没有。 */
+  get deadLinkOffer() {
+    return this.deadLink;
+  }
+
+  /** 放弃从死链创建笔记。 */
+  dismissDeadLink = (): void => {
+    this.deadLink = null;
+  };
+
+  /**
+   * 按死链原文创建笔记并打开。
+   *
+   * 父目录不存在或名称冲突时保留当前文档，并给出创建失败原因。
+   */
+  confirmDeadLink = async (): Promise<void> => {
+    const offer = this.deadLink;
+    this.deadLink = null;
+    if (offer === null) return;
+    const error = await this.createEntry(offer.path, "file");
+    if (error !== null) {
+      this.report(error);
+      return;
+    }
+    if (offer.anchor !== null) await this.openResolved(offer.path, offer.anchor);
+  };
+
+  /** 打开用户选中的候选；锚点在场时继续定位标题。 */
+  chooseLinkCandidate = async (chosen: string): Promise<void> => {
+    const selection = this.candidateSelection;
+    this.candidateSelection = null;
+    if (selection === null) return;
+    try {
+      await this.openResolved(chosen, selection.anchor);
+    } catch (error) {
+      this.report(`打开链接失败：${errorText(error)}`);
+    }
+  };
+
+  /** 打开唯一解析目标；带锚点时定位标题，失效锚点可见提示而不是空吞。 */
+  private async openResolved(path: string, anchor: string | null): Promise<void> {
+    if (anchor === null) {
+      await this.openFile(path);
+      return;
+    }
+    if (path === this.document.path) {
+      // 当前文档用活动大纲：未保存的新标题同样有效。
+      if (!this.navigation.jumpToHeadingText(anchor)) {
+        this.report(missingAnchor(anchor, false));
+        return;
+      }
+      // 同文档锚点跳转也算阅读栈的一跳，后退可回到跳转前的位置。
+      const previous = this.captureCurrentStep();
+      if (previous !== null) this.history.pushStep(previous);
+      this.currentStep = { path, anchor };
+      this.persistHistory();
+      return;
+    }
+    await this.navigation.openHeadingAnchor(path, anchor, this.openFile, () =>
+      this.report(missingAnchor(anchor, true)),
+    );
+    // openFile 已入栈并记录落点；这里把锚点补进当前条目。
+    if (this.document.path === path && this.currentStep?.path === path)
+      this.currentStep = { path, anchor };
+  }
+
+  /**
+   * 补全弹层：解析链接目标并返回其标题文本。
+   *
+   * 目标死链、歧义或索引失败都退化为空候选——补全是尽力而为的辅助能力，
+   * 不为它弹错误提示，也不打断写作。
+   */
+  suggestHeadings = async (target: string, kind: LinkKind): Promise<string[]> => {
+    const from = this.document.path;
+    if (from === null || target.trim() === "") return [];
+    try {
+      const resolved = await this.api.linksResolve(from, target, kind);
+      if (resolved.status !== "resolved") return [];
+      const headings = await this.api.indexHeadings(resolved.path);
+      return headings.map((heading) => heading.text);
+    } catch {
+      return [];
     }
   };
 
@@ -284,6 +535,7 @@ export class ReaderWorkspaceController {
       () => this.api.entryCreate(path, kind),
       (current) => (kind === "file" ? path : current),
       false,
+      null,
     );
   }
 
@@ -298,6 +550,7 @@ export class ReaderWorkspaceController {
         return current?.startsWith(`${from}/`) ? `${to}${current.slice(from.length)}` : current;
       },
       true,
+      (history) => history.remapPath(from, to),
     );
   }
 
@@ -308,6 +561,7 @@ export class ReaderWorkspaceController {
       () => this.api.entryTrash(path),
       (current) => (current === path || current?.startsWith(`${path}/`) ? null : current),
       false,
+      (history) => history.remapPath(path, null),
     );
   }
 
@@ -325,6 +579,7 @@ export class ReaderWorkspaceController {
     operation: () => Promise<RenameOutcome>,
     nextPath: (current: string | null) => string | null,
     reload: boolean,
+    remapHistory: ((history: ReaderHistory) => void) | null,
   ): Promise<string | null> {
     let committed = false;
     let pathAfter: string | null = this.document.path;
@@ -334,6 +589,17 @@ export class ReaderWorkspaceController {
         pathAfter = nextPath(before);
         const result = await operation();
         committed = true;
+        // 阅读栈跟随改名/移动；删除的条目直接移除。
+        if (remapHistory !== null) {
+          remapHistory(this.history);
+          if (this.currentStep !== null) {
+            const mapped = nextPath(this.currentStep.path);
+            this.currentStep = mapped === null ? null : { ...this.currentStep, path: mapped };
+          }
+          this.persistHistory();
+        }
+        // 改名后的当前文档保留源码视图选择。
+        if (pathAfter !== null && this.view === "source") this.sourceViews[pathAfter] = true;
         if (pathAfter !== before || reload) {
           if (pathAfter === null) {
             this.clearDocument();
@@ -399,7 +665,7 @@ export class ReaderWorkspaceController {
         );
       await this.api.sessionSetCurrent(copy.path);
       await this.refreshList();
-      await this.refreshMentions();
+      await this.refreshReferences();
     } catch (error) {
       if (savedPath === null) doc.recordSaveError(error);
       else
@@ -447,14 +713,21 @@ export class ReaderWorkspaceController {
   private clearDocument(): void {
     this.document.clear();
     this.navigation.clear();
+    this.view = "wysiwyg";
   }
 
   private async loadFile(path: string): Promise<void> {
     this.document.load(path, await this.api.fileSnapshot(path));
+    // 恢复记录属于排版会话；带恢复记录的文件强制排版视图，
+    // 否则记住的源码视图会让未写入磁盘的编辑静默缺席。
+    this.view =
+      Object.hasOwn(this.sourceViews, path) && !this.document.needsSourceRepair
+        ? "source"
+        : "wysiwyg";
     this.navigation.resetReferences();
     this.announce(this.document.dirty ? "已恢复上次未保存的编辑，请检查后保存。" : "");
     await this.api.sessionSetCurrent(path);
-    await this.refreshMentions();
+    await this.refreshReferences();
   }
 
   private async persist(): Promise<void> {
@@ -472,7 +745,7 @@ export class ReaderWorkspaceController {
         // 正文提交只清理保存自身的消息，不能把布局或会话失败误当成已解决。
         else if (this.notice?.kind !== "attention" || this.notice.source === "save")
           this.notice = null;
-        await this.refreshMentions();
+        await this.refreshReferences();
       }
     } finally {
       this.resumeVaultRefresh();
@@ -486,8 +759,8 @@ export class ReaderWorkspaceController {
     if (root === this.root && epoch === this.document.epoch) this.listed = files;
   }
 
-  private async refreshMentions(): Promise<void> {
-    const error = await this.navigation.refreshMentions(this.api);
+  private async refreshReferences(): Promise<void> {
+    const error = await this.navigation.refreshReferences(this.api);
     if (error !== null && this.message === "") this.report(error);
   }
 
@@ -533,7 +806,7 @@ export class ReaderWorkspaceController {
       if (doc.path === null) {
         this.navigation.clear();
         await this.api.sessionSetCurrent(null);
-      } else if (doc.path === path) await this.refreshMentions();
+      } else if (doc.path === path) await this.refreshReferences();
     } catch (error) {
       if (epoch === doc.epoch && !this.transitioning)
         this.report(`读取外部变更失败：${errorText(error)}`);

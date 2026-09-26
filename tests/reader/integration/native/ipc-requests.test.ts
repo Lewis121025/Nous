@@ -74,6 +74,7 @@ it("读取、预览、索引和文件操作统一拒绝错误路径与未知种�
     "reader.index.linksTo",
     "reader.index.linksFrom",
     "reader.index.mentionsTo",
+    "reader.index.headings",
     "reader.entry.trash",
     "reader.entry.reveal",
   ])
@@ -87,4 +88,31 @@ it("读取、预览、索引和文件操作统一拒绝错误路径与未知种�
   expect(call).not.toHaveBeenCalled();
   await invoke("reader.links.resolve", "原名.md", "标题#定位", "wiki");
   expect(call).toHaveBeenLastCalledWith("linksResolve", "原名.md", "标题#定位", "wiki");
+});
+
+it("检索条件在 IPC 入口结构化校验，超界上限被收敛后才进入内核", async () => {
+  for (const invalid of [
+    undefined,
+    "原始查询串",
+    { terms: "全文词", tags: [], attributes: [], pathContains: null, limit: 10 },
+    { terms: [], tags: [], attributes: [{ key: "k" }], pathContains: null, limit: 10 },
+    { terms: [], tags: [], attributes: [], pathContains: 1, limit: 10 },
+    { terms: [], tags: [], attributes: [], pathContains: null, limit: "10" },
+  ])
+    await expect(invoke("reader.search.query", invalid)).rejects.toThrow();
+  expect(call).not.toHaveBeenCalled();
+  await invoke("reader.search.query", {
+    terms: ["全文"],
+    tags: ["#标签"],
+    attributes: [{ key: "status", value: "draft" }],
+    pathContains: null,
+    limit: 1e9,
+  });
+  expect(call).toHaveBeenLastCalledWith("searchQuery", {
+    terms: ["全文"],
+    tags: ["#标签"],
+    attributes: [{ key: "status", value: "draft" }],
+    pathContains: null,
+    limit: 500,
+  });
 });

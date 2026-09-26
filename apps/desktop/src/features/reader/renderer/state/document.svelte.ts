@@ -157,6 +157,22 @@ export class ReaderDocument {
   }
 
   /**
+   * 视图切换（排版 ⇄ 源码）时以最新文本原地替换加载内容。
+   *
+   * 保存基准、脏标记与冲突状态全部保持：切换视图不是编辑，也不改变
+   * 磁盘契约；代次递增让旧表面的异步结果自然失效。恢复记录（recovery）
+   * 属于排版会话，调用方必须先确认 `needsSourceRepair` 为假再切换。
+   *
+   * @param text 当前活动表面的最新源码文本。
+   * @throws 当前内容不是可切换的 Markdown 时抛出。
+   */
+  replaceSourceText(text: string): void {
+    if (this.loaded?.kind !== "markdown") throw new Error("只有 Markdown 文档支持切换视图");
+    this.version += 1;
+    this.loaded = { kind: "markdown", source: text };
+  }
+
+  /**
    * 基于原始版本提交，期间的新输入继续保持未保存。
    * @param snapshot 从当前编辑器取得最新字节；未就绪时允许抛出。
    * @returns 写入结果；异常记录为 saveError，旧文档结果被丢弃，均返回 null。

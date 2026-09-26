@@ -57,7 +57,7 @@ test("组词确认和取消不提交弹窗、不跳转查找、不退出源码�
       });
     const commit = (text: string) => cdp.send("Input.insertText", { text });
 
-    const fileSearch = page.getByRole("searchbox", { name: "搜索文件和文件夹" });
+    const fileSearch = page.getByRole("searchbox", { name: "搜索文件和全文" });
     await fileSearch.fill("");
     await compose("输入");
     await page.keyboard.press("Escape");

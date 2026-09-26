@@ -58,6 +58,15 @@ export function installApplicationMenu(dispatch: (command: AppCommand) => void):
       ],
     },
     {
+      label: "导航",
+      submenu: [
+        command("后退", "CmdOrCtrl+[", "go-back"),
+        command("前进", "CmdOrCtrl+]", "go-forward"),
+        { type: "separator" },
+        command("切换排版/源码视图", "CmdOrCtrl+E", "toggle-source"),
+      ],
+    },
+    {
       label: "显示",
       submenu: [
         command("显示或隐藏文件栏", "CmdOrCtrl+\\", "toggle-files"),

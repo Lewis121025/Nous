@@ -2,12 +2,16 @@ import { expect, it } from "vitest";
 import {
   parseEmptyReply,
   parseEntryOutcome,
+  parseHeadingRecords,
   parseLinkKindArgument,
   parseLinkRecords,
+  parseLinkTarget,
   parseMentions,
   parseNullablePath,
   parsePaneLayoutMessage,
   parseSavedCopy,
+  parseSearchHits,
+  parseSearchQueryArgument,
   parseVaultEntries,
   parseVaultRestore,
   parseWriteRequest,
@@ -72,7 +76,16 @@ it("库与目录快照要求完整结构，不能把错误响应显示为空库�
   expect(parseVaultRestore({ root: "/笔记", currentPath: null })).toEqual({
     root: "/笔记",
     currentPath: null,
+    history: { back: [], forward: [] },
   });
+  // 阅读栈随恢复响应归一化；损坏条目丢弃而不是拒绝整个恢复。
+  expect(
+    parseVaultRestore({
+      root: "/笔记",
+      currentPath: null,
+      history: { back: [{ path: "a.md", anchor: "小节" }, { path: 5 }], forward: "junk" },
+    })?.history,
+  ).toEqual({ back: [{ path: "a.md", anchor: "小节" }], forward: [] });
   expect(parseVaultRestore(null)).toBeNull();
   expect(() => parseVaultRestore({ root: "/笔记" })).toThrow();
   const entries = [
@@ -103,6 +116,7 @@ it("索引只接受明确语法及有效字节范围，错误记录不能被当�
     toRaw: "目标",
     toPath: null,
     kind: "wiki",
+    resolution: "dead",
     startByte: 4,
     endByte: 12,
   };
@@ -117,6 +131,8 @@ it("索引只接受明确语法及有效字节范围，错误记录不能被当�
     { startByte: 1.5 },
     { endByte: Number.MAX_SAFE_INTEGER + 1 },
     { toPath: false },
+    { resolution: "unknown" },
+    { resolution: undefined },
   ])
     expect(() => parseLinkRecords([{ ...link, ...change }])).toThrow();
 });
@@ -146,4 +162,100 @@ it("提及种类、分组和语法必须一致，保留当前纳秒时间字段�
   ])
     expect(() => parseMentions({ linked: [{ ...mention, ...change }], unlinked: [] })).toThrow();
   expect(() => parseMentions({ linked: [], unlinked: [mention] })).toThrow();
+});
+
+it("检索条件逐字段校验，超界上限收敛到内核对 i32 的表示范围", () => {
+  expect(
+    parseSearchQueryArgument({
+      terms: ["全文"],
+      tags: ["标签"],
+      attributes: [{ key: "status", value: "draft" }],
+      pathContains: "notes/",
+      limit: 1e9,
+    }),
+  ).toEqual({
+    terms: ["全文"],
+    tags: ["标签"],
+    attributes: [{ key: "status", value: "draft" }],
+    pathContains: "notes/",
+    limit: 500,
+  });
+  // 缺失的路径过滤按 null 归一化。
+  expect(
+    parseSearchQueryArgument({ terms: [], tags: [], attributes: [], limit: 10 }).pathContains,
+  ).toBeNull();
+  for (const invalid of [
+    undefined,
+    "原始查询串",
+    { terms: "全文", tags: [], attributes: [], pathContains: null, limit: 1 },
+    { terms: [1], tags: [], attributes: [], pathContains: null, limit: 1 },
+    { terms: [], tags: [], attributes: [{ key: "k" }], pathContains: null, limit: 1 },
+    { terms: [], tags: [], attributes: [], pathContains: 5, limit: 1 },
+    { terms: [], tags: [], attributes: [], pathContains: null, limit: "1" },
+    { terms: [], tags: [], attributes: [], pathContains: null, limit: Infinity },
+  ])
+    expect(() => parseSearchQueryArgument(invalid)).toThrow();
+});
+
+it("检索命中与标题记录逐项校验，损坏数据整体拒绝", () => {
+  expect(parseSearchHits([{ path: "a.md", title: "A", snippet: "前\u{1}命中\u{2}后" }])).toEqual([
+    { path: "a.md", title: "A", snippet: "前\u{1}命中\u{2}后" },
+  ]);
+  for (const invalid of [
+    {},
+    { path: "../逃逸.md", title: "A", snippet: "" },
+    { path: "a.md", title: 1, snippet: "" },
+    { path: "a.md", title: "A", snippet: null },
+  ])
+    expect(() => parseSearchHits([invalid])).toThrow("检索命中");
+  expect(() => parseSearchHits({})).toThrow("检索响应");
+
+  const heading = { path: "a.md", level: 2, text: "标题", startByte: 0, endByte: 9 };
+  expect(parseHeadingRecords([heading])).toEqual([heading]);
+  for (const change of [
+    { level: 0 },
+    { level: 7 },
+    { level: 2.5 },
+    { text: 1 },
+    { startByte: -1 },
+    { endByte: -1 },
+    { startByte: 9, endByte: 0 },
+  ])
+    expect(() => parseHeadingRecords([{ ...heading, ...change }])).toThrow("标题索引");
+  expect(() => parseHeadingRecords({})).toThrow("标题索引响应");
+});
+
+it("链接解析响应按状态判别，损坏响应不退化成死链", () => {
+  expect(parseLinkTarget({ status: "resolved", path: "a.md", anchor: null })).toEqual({
+    status: "resolved",
+    path: "a.md",
+    anchor: null,
+  });
+  // 缺失与空锚点统一归一化为 null。
+  expect(parseLinkTarget({ status: "resolved", path: "a.md" })).toEqual({
+    status: "resolved",
+    path: "a.md",
+    anchor: null,
+  });
+  expect(parseLinkTarget({ status: "resolved", path: "a.md", anchor: "" })).toEqual({
+    status: "resolved",
+    path: "a.md",
+    anchor: null,
+  });
+  expect(
+    parseLinkTarget({ status: "ambiguous", candidates: ["a/x.md", "b/x.md"], anchor: "小节" }),
+  ).toEqual({ status: "ambiguous", candidates: ["a/x.md", "b/x.md"], anchor: "小节" });
+  expect(parseLinkTarget({ status: "dead" })).toEqual({ status: "dead" });
+  for (const invalid of [
+    null,
+    "a.md",
+    { status: "unknown" },
+    { status: "resolved" },
+    { status: "resolved", path: "../逃逸.md", anchor: null },
+    { status: "resolved", path: "a.md", anchor: 5 },
+    { status: "ambiguous", candidates: [], anchor: null },
+    { status: "ambiguous", candidates: ["../逃逸.md"], anchor: null },
+    { status: "ambiguous", anchor: null },
+  ])
+    expect(() => parseLinkTarget(invalid)).toThrow("链接解析响应无效");
 });

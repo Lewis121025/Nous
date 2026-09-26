@@ -30,6 +30,19 @@ export type MarkdownEditorApi = {
    * @param occurrence 同一文件里同类命中的次序（从 1 计）。
    */
   jumpToMention: (mention: MentionRecord, occurrence: number) => void;
+  /**
+   * 跳到搜索命中词的第一次出现并居中；找不到时不移动选区。
+   *
+   * @param needle 命中词，大小写不敏感。
+   */
+  jumpToText: (needle: string) => void;
+  /**
+   * 按标题锚点或 `^` 块引用跳转：对齐到阅读区顶部，与大纲跳转一致。
+   *
+   * @param anchor 标题原文，或以 `^` 开头的块标识。标题匹配忽略大小写；块标识按原文精确匹配。
+   * @returns 是否找到并跳转；调用方据此提示锚点失效。
+   */
+  jumpToHeading: (anchor: string) => boolean;
 };
 
 /** 代码表面：返回缓冲区内的纯文本，并按字节跳转。 */

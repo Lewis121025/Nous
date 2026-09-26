@@ -35,4 +35,28 @@ describe("阅读器会话边界", () => {
     expect(parseReaderSession(null)).toEqual(emptyReaderSession);
     expect(parseReaderSession({ currentPath: "", vaultRoot: 1 })).toEqual(emptyReaderSession);
   });
+  it("阅读栈逐条归一化，损坏条目丢弃且不阻止会话恢复", () => {
+    const parsed = parseReaderSession({
+      history: {
+        back: [{ path: "a.md", anchor: "小节" }, { path: "" }, "junk", { path: "b.md", anchor: 5 }],
+        forward: [{ path: "c.md" }],
+      },
+    });
+    expect(parsed.history).toEqual({
+      back: [
+        { path: "a.md", anchor: "小节" },
+        { path: "b.md", anchor: null },
+      ],
+      forward: [{ path: "c.md", anchor: null }],
+    });
+    expect(parseReaderSession({}).history).toEqual({ back: [], forward: [] });
+    // 超长历史被截到上限，会话文件不随导航无限增长。
+    const long = Array.from({ length: 150 }, (_, index) => ({
+      path: `f${index}.md`,
+      anchor: null,
+    }));
+    expect(parseReaderSession({ history: { back: long, forward: [] } }).history.back).toHaveLength(
+      100,
+    );
+  });
 });

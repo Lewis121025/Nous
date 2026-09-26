@@ -8,6 +8,7 @@ vi.mock("electron", () => ({
 }));
 
 const bytes = (text: string) => new TextEncoder().encode(text);
+const emptyQuery = () => ({ terms: [], tags: [], attributes: [], pathContains: null, limit: 100 });
 beforeEach(() => vi.clearAllMocks());
 
 it("无效保存响应不能清除编辑、更新磁盘基准或冒充保存成功", async () => {
@@ -52,9 +53,20 @@ it("所有阅读器响应在进入调用方前校验，错误元数据不能冒�
     { read: () => api.entryRename("note.md", "new.md"), invalid: { warning: {} } },
     { read: () => api.fileRead("note.md"), invalid: "错误的文本字节" },
     { read: () => api.linksResolve("note.md", "目标", "wiki"), invalid: false },
+    { read: () => api.linksResolve("note.md", "目标", "wiki"), invalid: { status: "unknown" } },
+    {
+      read: () => api.linksResolve("note.md", "目标", "wiki"),
+      invalid: { status: "resolved", path: "../逃逸.md", anchor: null },
+    },
+    {
+      read: () => api.linksResolve("note.md", "目标", "wiki"),
+      invalid: { status: "ambiguous", candidates: [], anchor: null },
+    },
     { read: () => api.indexLinksTo("note.md"), invalid: [{}] },
     { read: () => api.indexLinksFrom("note.md"), invalid: [{}] },
     { read: () => api.indexMentionsTo("note.md"), invalid: { linked: [] } },
+    { read: () => api.searchQuery(emptyQuery()), invalid: [{ path: "../逃逸.md" }] },
+    { read: () => api.indexHeadings("note.md"), invalid: [{ path: "note.md", level: 9 }] },
   ];
   for (const request of requests) {
     vi.mocked(ipcRenderer.invoke).mockResolvedValueOnce(request.invalid);

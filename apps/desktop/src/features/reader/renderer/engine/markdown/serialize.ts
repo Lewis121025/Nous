@@ -56,6 +56,20 @@ function block(node: PmNode): BlockContent {
       return { type: "html", value: String(node.attrs["html"] ?? "") };
     case "markdown_block":
       return { type: "rawMarkdown", value: node.textContent };
+    case "note_embed": {
+      const anchor = optionalString(node, "anchor");
+      const target = String(node.attrs["target"] ?? "");
+      return {
+        type: "paragraph",
+        children: [
+          wiki(
+            anchor === null ? target : `${target}#${anchor}`,
+            optionalString(node, "alias"),
+            true,
+          ),
+        ],
+      };
+    }
     case "table":
       return {
         type: "table",

@@ -91,7 +91,7 @@
     {/if}
   </div>
   <WorkspaceFeedback {workspace} />
-  {#if doc.content?.kind === "markdown"}
+  {#if doc.content?.kind === "markdown" && workspace.viewMode === "wysiwyg"}
     <button
       class="reader-button format-button"
       type="button"
@@ -101,6 +101,23 @@
       onclick={onDocumentAction}
       onmousedown={(event) => event.preventDefault()}
       disabled={workspace.switching || workspace.copying}>Aa</button
+    >
+  {/if}
+  {#if doc.content?.kind === "markdown" && doc.canEdit}
+    <button
+      class="reader-button icon-button"
+      type="button"
+      aria-label={workspace.viewMode === "source" ? "切换排版视图" : "切换源码视图"}
+      aria-pressed={workspace.viewMode === "source"}
+      title={workspace.viewMode === "source" ? "切换排版视图" : "切换源码视图"}
+      onclick={() => {
+        onDocumentAction();
+        void workspace.toggleViewMode();
+      }}
+      disabled={workspace.switching || workspace.copying}
+      ><svg class="reader-icon" viewBox="0 0 24 24" aria-hidden="true"
+        ><path d="m8 8-4 4 4 4M16 8l4 4-4 4M13 6l-2 12" /></svg
+      ></button
     >
   {/if}
   {#if doc.canEdit}

@@ -4,6 +4,8 @@
   import FileList from "./components/files/FileList.svelte";
   import DocumentSurface from "./components/workspace/DocumentSurface.svelte";
   import FileEntryDialog from "./components/files/FileEntryDialog.svelte";
+  import LinkCandidatesDialog from "./components/workspace/LinkCandidatesDialog.svelte";
+  import DeadLinkDialog from "./components/workspace/DeadLinkDialog.svelte";
   import { parentDirectory, type FileEntryChange } from "./engine/navigation/file-tree";
   import { ReaderWorkspaceController } from "./state/workspace.svelte";
   import { createBrowserMediaIo } from "./engine/media/media";
@@ -25,6 +27,7 @@
   let entryDialog: FileEntryDialog | undefined = $state();
   let fileList: FileList | undefined = $state();
   let toolbar: ReaderToolbar | undefined = $state();
+  let mainPane: HTMLElement | undefined = $state();
 
   /** 组词与切换期间消费但不执行命令；模态输入框保留自身历史，不修改背后的正文。 */
   export function executeHistory(action: HistoryAction): boolean {
@@ -76,11 +79,30 @@
       case "toggle-files":
         toggleFilesPane();
         break;
+      case "go-back":
+        void workspace.navigateBack();
+        break;
+      case "go-forward":
+        void workspace.navigateForward();
+        break;
+      case "toggle-source":
+        void workspace.toggleViewMode();
+        break;
     }
   }
 
   onMount(() => {
     updateViewport();
+    // 阅读栈的滚动捕获/恢复绑定到主滚动区；恢复等待新文档渲染完成，
+    // 避免滚动值先被旧内容高度钳制。
+    workspace.history.attachScroll({
+      capture: () => mainPane?.scrollTop ?? null,
+      apply: (top) => {
+        void tick().then(() => {
+          if (mainPane) mainPane.scrollTop = top;
+        });
+      },
+    });
     const dispose = workspace.start();
     void (async () => {
       await restorePanes();
@@ -196,7 +218,14 @@
               ? "open-vault"
               : key === "\\"
                 ? "toggle-files"
-                : null;
+                : // 菜单加速键被系统消费时（含合成按键）由工作区兜底，与 Cmd+N 等同一路径。
+                  key === "[" && !event.shiftKey
+                  ? "go-back"
+                  : key === "]" && !event.shiftKey
+                    ? "go-forward"
+                    : key === "e" && !event.shiftKey
+                      ? "toggle-source"
+                      : null;
     if (command !== null) {
       event.preventDefault();
       executeCommand(command);
@@ -242,7 +271,7 @@
         persistPanes();
       }}
     />
-    <section class="main" inert={narrow && !filesCollapsed}>
+    <section class="main" bind:this={mainPane} inert={narrow && !filesCollapsed}>
       <div class:document-body={doc.content?.kind === "markdown"}>
         {#if doc.path !== null}
           <DocumentSurface {workspace} {mediaIo} />
@@ -289,11 +318,27 @@
       </div>
     </section>
   </div>
+  {#if workspace.deadLinkOffer !== null}
+    <DeadLinkDialog
+      path={workspace.deadLinkOffer.path}
+      anchor={workspace.deadLinkOffer.anchor}
+      onConfirm={() => void workspace.confirmDeadLink()}
+      onDismiss={workspace.dismissDeadLink}
+    />
+  {/if}
   <FileEntryDialog
     bind:this={entryDialog}
     {workspace}
     onComplete={(change) => void finishEntryOperation(change)}
   />
+  {#if workspace.linkCandidates !== null}
+    <LinkCandidatesDialog
+      paths={workspace.linkCandidates.paths}
+      anchor={workspace.linkCandidates.anchor}
+      onChoose={(path) => void workspace.chooseLinkCandidate(path)}
+      onDismiss={workspace.dismissLinkCandidates}
+    />
+  {/if}
 </div>
 
 <style>

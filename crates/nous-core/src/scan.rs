@@ -1,4 +1,7 @@
-//! 从 Markdown 源抽出 wiki 与内部 Markdown 链接。
+//! 从 Markdown 源一次解析抽出链接、标题、全文正文、标签与 frontmatter。
+//!
+//! 链接区间供改名事务按字节重写；标题与正文供索引（锚点解析、全文搜索）；
+//! 标签与 frontmatter 属性供搜索谓词。所有派生事实共享同一次 `to_mdast`。
 
 use markdown::mdast::Node;
 use markdown::{to_mdast, Constructs, ParseOptions};
@@ -7,16 +10,66 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::OnceLock;
 
+use crate::frontmatter;
 use crate::link::{LinkKind, LinkRecord};
+use crate::tag;
 
 fn wiki_regex() -> &'static Regex {
     static WIKI: OnceLock<Regex> = OnceLock::new();
     WIKI.get_or_init(|| Regex::new(r"\[\[([^\[\]\r\n]+)\]\]").expect("wiki 正则"))
 }
 
-/// 一次解析同时取出标题与出链，避免同一篇走两遍 `to_mdast`。
+/// 一篇标题记录：等级、纯文本与标题节点在源文件的字节区间。
+///
+/// 区间覆盖整个标题节点（含 `#` 标记行首），供锚点跳转定位块起点。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeadingScan {
+    /// ATX/Setext 等级，1–6。
+    pub level: i64,
+    /// 去除行内语法后的标题纯文本（已 trim）。
+    pub text: String,
+    /// 标题节点起点（含）。
+    pub start_byte: i64,
+    /// 标题节点终点（不含）。
+    pub end_byte: i64,
+}
+
+/// 一篇 Markdown 的完整抽取结果。
+pub(crate) struct ScannedMarkdown {
+    /// 首个非空标题文本；展示标题回退用，与历史 `find_heading` 语义一致。
+    pub title: Option<String>,
+    /// 出链，按 `start_byte` 升序。
+    pub links: Vec<LinkRecord>,
+    /// 全部非空标题，按文档顺序。
+    pub headings: Vec<HeadingScan>,
+    /// 全文索引用正文纯文本：frontmatter、HTML、数学与链接 URL 除外，
+    /// 代码块内容计入（对齐 Obsidian 的搜索范围）。
+    pub body_text: String,
+    /// frontmatter 与行内标签合并后的规范化标签（小写、无 `#`、去重）。
+    pub tags: Vec<String>,
+    /// frontmatter 属性行 `(key, value)`；key 保留原文大小写。
+    pub attributes: Vec<(String, String)>,
+}
+
+impl ScannedMarkdown {
+    fn empty() -> Self {
+        Self {
+            title: None,
+            links: Vec::new(),
+            headings: Vec::new(),
+            body_text: String::new(),
+            tags: Vec::new(),
+            attributes: Vec::new(),
+        }
+    }
+}
+
+/// 一次解析同时取出全部派生事实，避免同一篇走多遍 `to_mdast`。
+///
+/// 解析失败（非法 UTF-8 由调用方拦截；此处是 mdast 构造错误）返回空结果，
+/// 不能挡住库打开。
 #[must_use]
-pub fn scan_markdown(from_path: &str, source: &str) -> (Option<String>, Vec<LinkRecord>) {
+pub fn scan_markdown(from_path: &str, source: &str) -> ScannedMarkdown {
     let options = ParseOptions {
         constructs: Constructs {
             frontmatter: true,
@@ -27,7 +80,7 @@ pub fn scan_markdown(from_path: &str, source: &str) -> (Option<String>, Vec<Link
         ..ParseOptions::default()
     };
     let Ok(tree) = to_mdast(source, &options) else {
-        return (None, Vec::new());
+        return ScannedMarkdown::empty();
     };
     let mut links = Vec::new();
     let mut excluded = Vec::new();
@@ -44,7 +97,137 @@ pub fn scan_markdown(from_path: &str, source: &str) -> (Option<String>, Vec<Link
     excluded.sort_unstable_by_key(|span| span.start);
     collect_wiki(from_path, source, &excluded, &mut links);
     links.sort_by_key(|link| link.start_byte);
-    (find_heading(&tree), links)
+
+    let mut structure = Structure::default();
+    collect_structure(&tree, source, &mut structure);
+    let wiki_ranges: Vec<Range<usize>> = links
+        .iter()
+        .filter(|link| link.kind == LinkKind::Wiki)
+        .filter_map(|link| {
+            let start = usize::try_from(link.start_byte).ok()?;
+            let end = usize::try_from(link.end_byte).ok()?;
+            Some(start..end)
+        })
+        .collect();
+    let mut tags = Vec::new();
+    let mut attributes = Vec::new();
+    if let Some(yaml) = &structure.frontmatter {
+        let data = frontmatter::parse(yaml);
+        tags = data.tags;
+        attributes = data.attributes;
+    }
+    for inline in tag::inline_tags(source, &structure.text_ranges, &wiki_ranges) {
+        if !tags.contains(&inline) {
+            tags.push(inline);
+        }
+    }
+    let title = structure
+        .headings
+        .first()
+        .map(|heading| heading.text.clone());
+    ScannedMarkdown {
+        title,
+        links,
+        headings: structure.headings,
+        body_text: structure.body,
+        tags,
+        attributes,
+    }
+}
+
+/// 结构遍历的累积输出。
+#[derive(Default)]
+struct Structure {
+    headings: Vec<HeadingScan>,
+    body: String,
+    frontmatter: Option<String>,
+    /// `Text` 节点的源字节区间；行内标签按原文提取，实体转义不会被误解码。
+    text_ranges: Vec<Range<usize>>,
+}
+
+/// 收集标题、正文纯文本、frontmatter 原文与 `Text` 源区间。
+///
+/// 块级子节点后补 `\n`、表格单元格后补空格，避免跨节点词粘连制造
+/// 假 trigram 命中。
+fn collect_structure(node: &Node, source: &str, out: &mut Structure) {
+    match node {
+        Node::Yaml(yaml) => {
+            if out.frontmatter.is_none() {
+                out.frontmatter = Some(yaml.value.clone());
+            }
+            return;
+        }
+        Node::Toml(_)
+        | Node::Html(_)
+        | Node::Math(_)
+        | Node::InlineMath(_)
+        | Node::Definition(_)
+        | Node::Image(_)
+        | Node::ImageReference(_) => return,
+        Node::Code(code) => {
+            out.body.push_str(&code.value);
+            out.body.push('\n');
+            return;
+        }
+        Node::InlineCode(code) => {
+            out.body.push_str(&code.value);
+            return;
+        }
+        Node::Text(text) => {
+            out.body.push_str(&text.value);
+            if let Some(position) = &text.position {
+                let start = position.start.offset.min(source.len());
+                let end = position.end.offset.min(source.len()).max(start);
+                out.text_ranges.push(start..end);
+            }
+            return;
+        }
+        Node::Heading(heading) => {
+            if let Some(record) = heading_record(heading) {
+                out.headings.push(record);
+            }
+        }
+        Node::Break(_) | Node::ThematicBreak(_) => {
+            out.body.push(' ');
+            return;
+        }
+        _ => {}
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_structure(child, source, out);
+            match child {
+                Node::TableCell(_) => out.body.push(' '),
+                Node::Paragraph(_)
+                | Node::Heading(_)
+                | Node::Blockquote(_)
+                | Node::List(_)
+                | Node::ListItem(_)
+                | Node::Table(_)
+                | Node::TableRow(_) => out.body.push('\n'),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn heading_record(heading: &markdown::mdast::Heading) -> Option<HeadingScan> {
+    let text = heading
+        .children
+        .iter()
+        .map(Node::to_string)
+        .collect::<String>();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let position = heading.position.as_ref()?;
+    Some(HeadingScan {
+        level: i64::from(heading.depth),
+        text: trimmed.to_string(),
+        start_byte: i64::try_from(position.start.offset).ok()?,
+        end_byte: i64::try_from(position.end.offset).ok()?,
+    })
 }
 
 fn collect_references(node: &Node, references: &mut HashSet<String>) {
@@ -62,29 +245,6 @@ fn collect_references(node: &Node, references: &mut HashSet<String>) {
             collect_references(child, references);
         }
     }
-}
-
-fn find_heading(node: &Node) -> Option<String> {
-    if let Node::Heading(heading) = node {
-        let text = heading
-            .children
-            .iter()
-            .map(Node::to_string)
-            .collect::<String>();
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        return Some(trimmed.to_string());
-    }
-    if let Some(children) = node.children() {
-        for child in children {
-            if let Some(found) = find_heading(child) {
-                return Some(found);
-            }
-        }
-    }
-    None
 }
 
 fn walk(
@@ -165,6 +325,7 @@ fn markdown_link(from_path: &str, source: &str, node: &Node, url: &str) -> Optio
         kind: LinkKind::Markdown,
         start_byte: start,
         end_byte: end,
+        resolution: crate::link::LinkResolution::Dead,
     })
 }
 
@@ -208,6 +369,7 @@ fn collect_wiki(
             kind: LinkKind::Wiki,
             start_byte: start,
             end_byte: end,
+            resolution: crate::link::LinkResolution::Dead,
         });
     }
 }

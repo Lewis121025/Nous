@@ -350,19 +350,53 @@ pub fn file_write_copy(
     })
 }
 
+/// 链接解析结果：路径、锚点与歧义候选分开返回。
+#[napi(object)]
+pub struct JsLinkTarget {
+    /// `resolved`、`ambiguous` 或 `dead`。
+    pub status: String,
+    /// 唯一命中的库内路径；仅 `resolved` 提供。
+    pub path: Option<String>,
+    /// 歧义候选路径（升序）；仅 `ambiguous` 提供。
+    pub candidates: Option<Vec<String>>,
+    /// 已解码的标题锚点；无锚点为缺失。
+    pub anchor: Option<String>,
+}
+
 /// 解析链接目标。
 ///
-/// `kind` 为 `wiki` 或 `md`。
+/// `kind` 为 `wiki` 或 `md`。歧义时返回全部候选，由界面让用户选择。
 ///
 /// # Errors
 ///
 /// 未打开库或 kind 非法。
 #[napi]
-pub fn links_resolve(from: String, raw: String, kind: String) -> Result<Option<String>> {
+pub fn links_resolve(from: String, raw: String, kind: String) -> Result<JsLinkTarget> {
     let kind: LinkKind = kind
         .parse()
         .map_err(|()| Error::from_reason("未知链接种类"))?;
-    with_vault(|vault| Ok(vault.resolve_link(&from, &raw, kind)))
+    with_vault(|vault| {
+        Ok(match vault.resolve_link(&from, &raw, kind) {
+            nous_core::LinkTarget::Resolved { path, anchor } => JsLinkTarget {
+                status: "resolved".into(),
+                path: Some(path),
+                candidates: None,
+                anchor,
+            },
+            nous_core::LinkTarget::Ambiguous { candidates, anchor } => JsLinkTarget {
+                status: "ambiguous".into(),
+                path: None,
+                candidates: Some(candidates),
+                anchor,
+            },
+            nous_core::LinkTarget::Dead => JsLinkTarget {
+                status: "dead".into(),
+                path: None,
+                candidates: None,
+                anchor: None,
+            },
+        })
+    })
 }
 
 /// 一条索引中的链接。
@@ -372,7 +406,7 @@ pub struct JsLinkRecord {
     pub from_path: String,
     /// 链接原文中的目标。
     pub to_raw: String,
-    /// 解析到的路径；死链为 `null`。
+    /// 解析到的路径；死链、歧义和纯锚点为 `null`。
     pub to_path: Option<String>,
     /// `wiki` 或 `md`。
     pub kind: String,
@@ -380,6 +414,8 @@ pub struct JsLinkRecord {
     pub start_byte: i64,
     /// 字节区间终点（不含）。
     pub end_byte: i64,
+    /// `resolved`、`ambiguous`、`dead` 或 `self`。
+    pub resolution: String,
 }
 
 fn to_js(link: nous_core::LinkRecord) -> JsLinkRecord {
@@ -390,6 +426,7 @@ fn to_js(link: nous_core::LinkRecord) -> JsLinkRecord {
         kind: link.kind.as_str().to_string(),
         start_byte: link.start_byte,
         end_byte: link.end_byte,
+        resolution: link.resolution.as_str().to_string(),
     }
 }
 
@@ -477,6 +514,105 @@ pub fn index_mentions_to(path: String) -> Result<JsMentions> {
         linked: mentions.linked.into_iter().map(to_js_mention).collect(),
         unlinked: mentions.unlinked.into_iter().map(to_js_mention).collect(),
     })
+}
+
+/// 属性谓词：frontmatter 键值对，键值均大小写不敏感精确匹配。
+#[napi(object)]
+pub struct JsSearchAttribute {
+    /// 属性名，保留原文大小写。
+    pub key: String,
+    /// 属性值。
+    pub value: String,
+}
+
+/// 结构化检索条件；查询文本解析在渲染层完成，各字段之间是 AND 关系。
+#[napi(object)]
+pub struct JsSearchQuery {
+    /// 全文词；大小写不敏感子串匹配。
+    pub terms: Vec<String>,
+    /// 标签谓词；祖先标签前缀匹配嵌套子标签。
+    pub tags: Vec<String>,
+    /// 属性谓词。
+    pub attributes: Vec<JsSearchAttribute>,
+    /// 路径子串过滤；缺失表示不过滤。
+    pub path_contains: Option<String>,
+    /// 结果上限；非正数按内核默认值处理。
+    pub limit: i32,
+}
+
+/// 一条搜索命中。
+#[napi(object)]
+pub struct JsSearchHit {
+    /// 命中文件库内相对路径。
+    pub path: String,
+    /// 展示标题。
+    pub title: String,
+    /// 正文摘要；命中词以 U+0001/U+0002 控制字符包围，可能为空串。
+    pub snippet: String,
+}
+
+/// 执行结构化检索。
+///
+/// # Errors
+///
+/// 未打开库或索引查询失败。
+#[napi]
+pub fn search_query(query: JsSearchQuery) -> Result<Vec<JsSearchHit>> {
+    let query = nous_core::SearchQuery {
+        terms: query.terms,
+        tags: query.tags,
+        attributes: query
+            .attributes
+            .into_iter()
+            .map(|attribute| (attribute.key, attribute.value))
+            .collect(),
+        path_contains: query.path_contains,
+        limit: i64::from(query.limit),
+    };
+    let hits = with_vault(|vault| vault.search(&query))?;
+    Ok(hits
+        .into_iter()
+        .map(|hit| JsSearchHit {
+            path: hit.path,
+            title: hit.title,
+            snippet: hit.snippet,
+        })
+        .collect())
+}
+
+/// 索引里的一条标题记录。
+#[napi(object)]
+pub struct JsHeadingRecord {
+    /// 源文件相对路径。
+    pub path: String,
+    /// 标题等级（1–6）。
+    pub level: i64,
+    /// 去除行内语法后的标题纯文本。
+    pub text: String,
+    /// 字节区间起点（含）。
+    pub start_byte: i64,
+    /// 字节区间终点（不含）。
+    pub end_byte: i64,
+}
+
+/// `path` 的全部标题，按文档顺序；供锚点解析与标题补全。
+///
+/// # Errors
+///
+/// 未打开库。
+#[napi]
+pub fn index_headings(path: String) -> Result<Vec<JsHeadingRecord>> {
+    let headings = with_vault(|vault| vault.headings(&path))?;
+    Ok(headings
+        .into_iter()
+        .map(|heading| JsHeadingRecord {
+            path: heading.path,
+            level: heading.level,
+            text: heading.text,
+            start_byte: heading.start_byte,
+            end_byte: heading.end_byte,
+        })
+        .collect())
 }
 
 /// 文件已经完成改名，索引或日志清理可能仍需重试。

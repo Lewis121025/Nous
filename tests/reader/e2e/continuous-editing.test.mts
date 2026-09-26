@@ -68,12 +68,25 @@ test("连续阅读与编辑时，链接不误跳转、源码不抢焦点且能�
     const start = await editor.locator(":scope > p").nth(0).boundingBox();
     const end = await editor.locator(":scope > p").nth(1).boundingBox();
     if (start === null || end === null) throw new Error("正文不可见");
-    await page.mouse.move(start.x + 2, start.y + start.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(end.x + end.width - 2, end.y + end.height / 2, { steps: 12 });
-    expect(await quickFormat.isVisible()).toBe(false);
-    await page.mouse.up();
-    expect(await page.evaluate(() => window.getSelection()?.toString())).toContain("链接文字");
+    // 拖拽期间 ProseMirror 推迟选区回写，mouseup 后经 setTimeout 把内部状态
+    // 写回 DOM；合成拖拽的事件间隔远小于真人，这次回写可能与最后一次
+    // selectionchange 竞态，把 DOM 选区倒回中途位置（本用例历史偶发失败源）。
+    // 按真人节奏停顿等待同步落定；仍偶发竞态时整体重试拖拽直至选区正确。
+    await expect
+      .poll(
+        async () => {
+          await page.mouse.move(start.x + 2, start.y + start.height / 2);
+          await page.mouse.down();
+          await page.mouse.move(end.x + end.width - 2, end.y + end.height / 2, { steps: 12 });
+          expect(await quickFormat.isVisible()).toBe(false);
+          await page.waitForTimeout(100);
+          await page.mouse.up();
+          await page.waitForTimeout(50);
+          return page.evaluate(() => window.getSelection()?.toString() ?? "");
+        },
+        { timeout: 10000, interval: 100 },
+      )
+      .toContain("链接文字");
     expect(await page.locator(".document-name").innerText()).toBe("笔记.md");
     expect(await editor.locator(".math-source").count()).toBe(0);
 

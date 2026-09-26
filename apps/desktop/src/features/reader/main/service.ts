@@ -5,11 +5,15 @@ import { join } from "node:path";
 import type * as NativeModule from "@nous/native";
 import type {
   FileSnapshot,
+  HeadingRecord,
   LinkKind,
   LinkRecord,
+  LinkTarget,
   Mentions,
   RenameOutcome,
   SavedCopy,
+  SearchHit,
+  SearchQuery,
   VaultRestore,
   WriteResult,
   VaultEntry,
@@ -18,11 +22,20 @@ import type {
 import { parseVaultEvent } from "../shared/api";
 import { parseAttachmentRequest, parseImportedAttachment } from "../shared/attachments";
 import { parseDraftRequest } from "../shared/editor-recovery";
-import type { ReaderSession, ReaderSessionStore } from "../shared/session";
+import type {
+  HistoryEntry,
+  ReaderSession,
+  ReaderSessionStore,
+  SessionHistory,
+} from "../shared/session";
 import {
   parseFileBytes,
+  parseHeadingRecords,
   parseLinkRecords,
+  parseLinkTarget,
   parseMentions,
+  parseSearchHits,
+  parseSearchQueryArgument,
   parseWriteResult,
   parseSavedCopy,
 } from "../shared/reader-protocol";
@@ -43,6 +56,7 @@ function mapLink(link: NativeModule.JsLinkRecord) {
     toRaw: link.toRaw,
     toPath: link.toPath ?? null,
     kind: link.kind,
+    resolution: link.resolution,
     startByte: link.startByte,
     endByte: link.endByte,
   };
@@ -67,6 +81,32 @@ function mapMentions(value: NativeModule.JsMentions): Mentions {
     linked: value.linked.map(mapMention),
     unlinked: value.unlinked.map(mapMention),
   });
+}
+
+/**
+ * 会话阅读栈的路径迁移；没有任何变化时返回 null，避免无谓的会话重写。
+ *
+ * @param history 持久化的阅读栈。
+ * @param mapPath 与当前文档同口径的路径映射；null 表示条目应移除。
+ */
+function mapSessionHistory(
+  history: SessionHistory,
+  mapPath: (path: string) => string | null,
+): SessionHistory | null {
+  let changed = false;
+  const map = (entries: HistoryEntry[]): HistoryEntry[] =>
+    entries.flatMap((entry) => {
+      const path = mapPath(entry.path);
+      if (path === null) {
+        changed = true;
+        return [];
+      }
+      if (path !== entry.path) changed = true;
+      return [{ ...entry, path }];
+    });
+  const back = map(history.back);
+  const forward = map(history.forward);
+  return changed ? { back, forward } : null;
 }
 
 /**
@@ -109,10 +149,19 @@ export function createReaderService(
   ): RenameOutcome {
     try {
       const session = sessions.load();
-      if (session.currentPath !== null) {
-        const currentPath = mapPath(session.currentPath);
-        if (currentPath !== session.currentPath) sessions.save({ ...session, currentPath });
+      let currentPath = session.currentPath;
+      let changed = false;
+      if (currentPath !== null) {
+        const mapped = mapPath(currentPath);
+        if (mapped !== currentPath) {
+          currentPath = mapped;
+          changed = true;
+        }
       }
+      // 阅读栈条目与当前文档同一口径跟随改名/删除。
+      const history = mapSessionHistory(session.history, mapPath);
+      if (history !== null) changed = true;
+      if (changed) sessions.save({ ...session, currentPath, history: history ?? session.history });
     } catch (error) {
       warning = [warning, `文件操作已完成，会话更新失败：${String(error)}`]
         .filter(Boolean)
@@ -126,7 +175,13 @@ export function createReaderService(
     vaultOpen(root: string): string {
       const previous = sessions.load();
       // 先确认会话可写，避免内核已切库、界面却因会话写入失败而留在原库。
-      sessions.save({ ...previous, vaultRoot: root, currentPath: null });
+      // 阅读栈属于旧库，切库即清空。
+      sessions.save({
+        ...previous,
+        vaultRoot: root,
+        currentPath: null,
+        history: { back: [], forward: [] },
+      });
       try {
         openVault(root);
       } catch (error) {
@@ -144,7 +199,7 @@ export function createReaderService(
       const root = stored.vaultRoot;
       if (root === null || !isDirectory(root)) return null;
       openVault(root);
-      return { root, currentPath: stored.currentPath };
+      return { root, currentPath: stored.currentPath, history: stored.history };
     },
     vaultClose(): void {
       native.vaultClose();
@@ -256,8 +311,14 @@ export function createReaderService(
       );
       return parseSavedCopy({ path: copy.path, warning: copy.warning ?? null });
     },
-    linksResolve(from: string, raw: string, kind: LinkKind): string | null {
-      return native.linksResolve(from, raw, kind) ?? null;
+    linksResolve(from: string, raw: string, kind: LinkKind): LinkTarget {
+      const target = native.linksResolve(from, raw, kind);
+      return parseLinkTarget({
+        status: target.status,
+        path: target.path ?? null,
+        candidates: target.candidates ?? null,
+        anchor: target.anchor ?? null,
+      });
     },
     indexLinksTo(path: string): LinkRecord[] {
       return parseLinkRecords(native.indexLinksTo(path).map(mapLink));
@@ -267,6 +328,22 @@ export function createReaderService(
     },
     indexMentionsTo(path: string): Mentions {
       return mapMentions(native.indexMentionsTo(path));
+    },
+    searchQuery(query: SearchQuery): SearchHit[] {
+      const request = parseSearchQueryArgument(query);
+      return parseSearchHits(
+        native.searchQuery({
+          terms: request.terms,
+          tags: request.tags,
+          attributes: request.attributes.map(({ key, value }) => ({ key, value })),
+          // exactOptionalPropertyTypes：不过滤时必须省略键，不能传 undefined。
+          ...(request.pathContains === null ? {} : { pathContains: request.pathContains }),
+          limit: request.limit,
+        }),
+      );
+    },
+    indexHeadings(path: string): HeadingRecord[] {
+      return parseHeadingRecords(native.indexHeadings(path));
     },
     entryRename(from: string, to: string): RenameOutcome {
       const result = native.entryRename(from, to);

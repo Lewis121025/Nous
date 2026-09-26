@@ -5,6 +5,7 @@
  */
 
 import type { ImportedAttachment } from "./attachments";
+import type { SessionHistory } from "./session";
 
 /** 历史动作由当前输入表面执行，不建立独立于编辑器的撤销记录。 */
 export type HistoryAction = "undo" | "redo";
@@ -21,10 +22,24 @@ export type ReaderCommand =
   | "find"
   | "find-files"
   | "toggle-files"
-  | "insert-attachment";
+  | "insert-attachment"
+  | "go-back"
+  | "go-forward"
+  | "toggle-source";
 
 /** 链接语法。 */
 export type LinkKind = "wiki" | "md";
+
+/**
+ * 链接解析结果：资源路径与 `#` 锚点分开返回。
+ *
+ * 歧义（同名多候选）必须由界面让用户选择，不允许静默取一；
+ * 纯锚点链接（`[[#标题]]`）解析为源文件自身。
+ */
+export type LinkTarget =
+  | { status: "resolved"; path: string; anchor: string | null }
+  | { status: "ambiguous"; candidates: string[]; anchor: string | null }
+  | { status: "dead" };
 
 /** 后台能力的故障独立于文档保存状态；路径始终是当前库的相对路径。 */
 export type VaultEvent =
@@ -57,13 +72,16 @@ export function parseVaultEvent(value: unknown): VaultEvent {
   throw new Error("库事件状态无效或缺少错误原因");
 }
 
+/** 索引解析状态。`toPath` 只在 `resolved` 时有值。 */
+export type LinkResolution = "resolved" | "ambiguous" | "dead" | "self";
+
 /** 索引中的一条链接。 */
 export type LinkRecord = {
   /** 源文件库内相对路径。 */
   fromPath: string;
   /** 链接原文中的目标。 */
   toRaw: string;
-  /** 解析到的路径；死链为 `null`。 */
+  /** 唯一解析到的路径；歧义、死链和纯锚点为 `null`。 */
   toPath: string | null;
   /** 语法种类。 */
   kind: LinkKind;
@@ -71,6 +89,8 @@ export type LinkRecord = {
   startByte: number;
   /** 字节区间终点（不含）。 */
   endByte: number;
+  /** 死链、同名歧义与纯锚点在索引里分开记录。 */
+  resolution: LinkResolution;
 };
 
 /** 提及是入链还是未做成链接的正文出现。 */
@@ -106,6 +126,44 @@ export type Mentions = {
   unlinked: MentionRecord[];
 };
 
+/** 结构化检索条件；由查询文本在渲染层解析而来，各字段之间是 AND 关系。 */
+export type SearchQuery = {
+  /** 全文词；大小写不敏感子串匹配。 */
+  terms: string[];
+  /** 标签谓词；祖先标签前缀匹配嵌套子标签。 */
+  tags: string[];
+  /** frontmatter 属性谓词；键值均大小写不敏感精确匹配。 */
+  attributes: { key: string; value: string }[];
+  /** 路径子串过滤；`null` 表示不过滤。 */
+  pathContains: string | null;
+  /** 结果上限；非正数由内核取默认值。 */
+  limit: number;
+};
+
+/** 一条搜索命中。 */
+export type SearchHit = {
+  /** 命中文件库内相对路径。 */
+  path: string;
+  /** 展示标题。 */
+  title: string;
+  /** 正文摘要；命中词以 U+0001/U+0002 控制字符包围，可能为空串。 */
+  snippet: string;
+};
+
+/** 索引里的一条标题记录。 */
+export type HeadingRecord = {
+  /** 源文件库内相对路径。 */
+  path: string;
+  /** 标题等级（1–6）。 */
+  level: number;
+  /** 去除行内语法后的标题纯文本。 */
+  text: string;
+  /** 字节区间起点（含）。 */
+  startByte: number;
+  /** 字节区间终点（不含）。 */
+  endByte: number;
+};
+
 /** 文件栏默认宽度与拖拽范围（像素）。 */
 export const SIDEBAR_LAYOUT = {
   leftWidth: 232,
@@ -131,6 +189,8 @@ export type VaultRestore = {
   root: string;
   /** 上次打开的库内相对路径；没有或已删除为 `null`。 */
   currentPath: string | null;
+  /** 上次会话的阅读栈；渲染端按当前文件列表过滤失效条目。 */
+  history: SessionHistory;
 };
 
 /** 打开文件时同时取回尚未提交的编辑，删除后的文件也能恢复。 */
@@ -177,6 +237,8 @@ export type ReaderApi = {
   vaultRestore: () => Promise<VaultRestore | null>;
   /** 把当前打开的相对路径写入会话；`null` 表示没有打开文件。 */
   sessionSetCurrent: (path: string | null) => Promise<void>;
+  /** 持久化阅读栈；仅接受库内相对路径与文本锚点。 */
+  sessionSetHistory: (history: SessionHistory) => Promise<void>;
   /** 读取文件栏布局（宽度、收起）。 */
   sessionGetPanes: () => Promise<PaneLayout>;
   /** 记住文件栏布局；不能经此改库路径或当前文件。 */
@@ -219,8 +281,8 @@ export type ReaderApi = {
     bytes: Uint8Array,
     expected: Uint8Array | null,
   ) => Promise<SavedCopy>;
-  /** 解析内部链接。 */
-  linksResolve: (from: string, raw: string, kind: LinkKind) => Promise<string | null>;
+  /** 解析内部链接：路径、锚点与歧义候选。 */
+  linksResolve: (from: string, raw: string, kind: LinkKind) => Promise<LinkTarget>;
   /** 用户点击后用系统应用打开网页或邮件链接；无效地址和非允许协议拒绝。 */
   openExternal: (url: string) => Promise<void>;
   /** 入链。 */
@@ -229,6 +291,10 @@ export type ReaderApi = {
   indexMentionsTo: (path: string) => Promise<Mentions>;
   /** 出链。 */
   indexLinksFrom: (path: string) => Promise<LinkRecord[]>;
+  /** 结构化全文搜索：正文词、标签、属性与路径谓词组合。 */
+  searchQuery: (query: SearchQuery) => Promise<SearchHit[]>;
+  /** 一篇文件的全部标题，按文档顺序；供锚点解析与标题补全。 */
+  indexHeadings: (path: string) => Promise<HeadingRecord[]>;
   /** 改名并更新链接。 */
   entryRename: (from: string, to: string) => Promise<RenameOutcome>;
   /**

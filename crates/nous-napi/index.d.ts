@@ -141,23 +141,34 @@ export interface JsSavedCopy {
  * 未打开库、路径非法或副本提交失败。
  */
 export declare function fileWriteCopy(rel: string, bytes: Buffer, expected?: Buffer | undefined | null): JsSavedCopy
+/** 链接解析结果：路径、锚点与歧义候选分开返回。 */
+export interface JsLinkTarget {
+  /** `resolved`、`ambiguous` 或 `dead`。 */
+  status: string
+  /** 唯一命中的库内路径；仅 `resolved` 提供。 */
+  path?: string
+  /** 歧义候选路径（升序）；仅 `ambiguous` 提供。 */
+  candidates?: Array<string>
+  /** 已解码的标题锚点；无锚点为缺失。 */
+  anchor?: string
+}
 /**
  * 解析链接目标。
  *
- * `kind` 为 `wiki` 或 `md`。
+ * `kind` 为 `wiki` 或 `md`。歧义时返回全部候选，由界面让用户选择。
  *
  * # Errors
  *
  * 未打开库或 kind 非法。
  */
-export declare function linksResolve(from: string, raw: string, kind: string): string | null
+export declare function linksResolve(from: string, raw: string, kind: string): JsLinkTarget
 /** 一条索引中的链接。 */
 export interface JsLinkRecord {
   /** 源文件相对路径。 */
   fromPath: string
   /** 链接原文中的目标。 */
   toRaw: string
-  /** 解析到的路径；死链为 `null`。 */
+  /** 解析到的路径；死链、歧义和纯锚点为 `null`。 */
   toPath?: string
   /** `wiki` 或 `md`。 */
   kind: string
@@ -165,6 +176,8 @@ export interface JsLinkRecord {
   startByte: number
   /** 字节区间终点（不含）。 */
   endByte: number
+  /** `resolved`、`ambiguous`、`dead` 或 `self`。 */
+  resolution: string
 }
 /** 一条已链接或未链接提及。 */
 export interface JsMentionRecord {
@@ -218,6 +231,64 @@ export declare function indexLinksFrom(path: string): Array<JsLinkRecord>
  * 未打开库。
  */
 export declare function indexMentionsTo(path: string): JsMentions
+/** 属性谓词：frontmatter 键值对，键值均大小写不敏感精确匹配。 */
+export interface JsSearchAttribute {
+  /** 属性名，保留原文大小写。 */
+  key: string
+  /** 属性值。 */
+  value: string
+}
+/** 结构化检索条件；查询文本解析在渲染层完成，各字段之间是 AND 关系。 */
+export interface JsSearchQuery {
+  /** 全文词；大小写不敏感子串匹配。 */
+  terms: Array<string>
+  /** 标签谓词；祖先标签前缀匹配嵌套子标签。 */
+  tags: Array<string>
+  /** 属性谓词。 */
+  attributes: Array<JsSearchAttribute>
+  /** 路径子串过滤；缺失表示不过滤。 */
+  pathContains?: string
+  /** 结果上限；非正数按内核默认值处理。 */
+  limit: number
+}
+/** 一条搜索命中。 */
+export interface JsSearchHit {
+  /** 命中文件库内相对路径。 */
+  path: string
+  /** 展示标题。 */
+  title: string
+  /** 正文摘要；命中词以 U+0001/U+0002 控制字符包围，可能为空串。 */
+  snippet: string
+}
+/**
+ * 执行结构化检索。
+ *
+ * # Errors
+ *
+ * 未打开库或索引查询失败。
+ */
+export declare function searchQuery(query: JsSearchQuery): Array<JsSearchHit>
+/** 索引里的一条标题记录。 */
+export interface JsHeadingRecord {
+  /** 源文件相对路径。 */
+  path: string
+  /** 标题等级（1–6）。 */
+  level: number
+  /** 去除行内语法后的标题纯文本。 */
+  text: string
+  /** 字节区间起点（含）。 */
+  startByte: number
+  /** 字节区间终点（不含）。 */
+  endByte: number
+}
+/**
+ * `path` 的全部标题，按文档顺序；供锚点解析与标题补全。
+ *
+ * # Errors
+ *
+ * 未打开库。
+ */
+export declare function indexHeadings(path: string): Array<JsHeadingRecord>
 /** 文件已经完成改名，索引或日志清理可能仍需重试。 */
 export interface JsRenameOutcome {
   /** 提交后的警告；无警告时缺失。 */
